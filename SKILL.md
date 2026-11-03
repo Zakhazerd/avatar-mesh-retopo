@@ -1,6 +1,6 @@
 ---
 name: avatar-mesh-retopo
-description: Lower the triangle count of a VRChat/avatar mesh in Blender (through a Blender MCP connection) without breaking shape keys, weights, UVs, vertex colours or normals. The user picks up to six versions (loop levels L1/L2/L3, each with or without shape-key protection), which can be built in parallel by agents. Covers backups and full duplicates, edge-loop dissolve that keeps clean quads, guards for clothing, shape keys, silhouette and small features, data-exact verification, n-gon cleanup, background comparison renders, metrics, and an in-Blender comparison with a posable rig. Use when asked to reduce an avatar's polycount, retopo a garment or body part, or compare mesh reduction methods.
+description: Lower the triangle count of a VRChat/avatar mesh in Blender (through a Blender MCP connection) without breaking shape keys, weights, UVs, vertex colours or normals. The user picks up to six versions (loop levels LOD1/LOD2/LOD3, each with or without shape-key protection), which can be built in parallel by agents. Covers backups and full duplicates, edge-loop dissolve that keeps clean quads, guards for clothing, shape keys, silhouette and small features, data-exact verification, n-gon cleanup, background comparison renders, metrics, and an in-Blender comparison with a posable rig. Use when asked to reduce an avatar's polycount, retopo a garment or body part, or compare mesh reduction methods.
 ---
 
 # Avatar mesh retopo in Blender
@@ -39,17 +39,17 @@ Fill in `scripts/avatar_config.py` from that, and **confirm every value with the
 **Then ask these** before building anything (use AskUserQuestion if you have it):
 
 1. **Region:** which object and part (a garment, one leg, the body from the neck down). For the body this sets `REGION_MODE` / `REGION_ROOT_BONE` in the config.
-2. **Versions:** any of up to **six**. There are three loop levels, each **with** or **without** shape-key protection:
+2. **Versions:** any of up to **six**. There are three levels of detail, each **with** or **without** shape-key protection. LOD0 is the original; LOD1–LOD3 are reduced versions to choose one from, not a runtime LOD group:
 
    | Level | Loop rule | Faces | On our body (neck down) |
    |---|---|---|---|
-   | **L1** | closed rings, one pass | all quads | 56,090 tris (−11%), looks like the original, max loss 1.8 mm |
-   | **L2** | closed rings, two passes | all quads | 53,258 (−15%), max 1.8 mm at rest, 4.7 mm bent |
-   | **L3** | any clean loop, one pass | quads + clean pentagons + some triangles | 45,086 (−28%), max 4.7 mm, 8.5 mm in a deep sit |
+   | **LOD1** | closed rings, one pass | all quads | 56,090 tris (−11%), looks like the original, max loss 1.8 mm |
+   | **LOD2** | closed rings, two passes | all quads | 53,258 (−15%), max 1.8 mm at rest, 4.7 mm bent |
+   | **LOD3** | any clean loop, one pass | quads + clean pentagons + some triangles | 45,086 (−28%), max 4.7 mm, 8.5 mm in a deep sit |
 
-   - **With shape-key protection:** a loop is kept wherever removing it would change any shape key by more than 1 mm. It costs a little: L3 went from 45,086 to 46,648.
+   - **With shape-key protection:** a loop is kept wherever removing it would change any shape key by more than 1 mm. It costs a little: LOD3 went from 45,086 to 46,648.
    - **Without it:** the Basis is treated as the final shape. Keys still transfer exactly on every kept vertex, but they lose the detail of the removed loops. On our body, a garter-squeeze key lost up to 5–7 mm.
-   - **Why rings reduce so little:** on a body, few closed rings stay unbroken inside the region (UV seams and protected edges cut most of the torso's), so L1/L2 mostly thin the arms, legs and fingers. On a tube-like part (one leg) L1/L2 work better.
+   - **Why rings reduce so little:** on a body, few closed rings stay unbroken inside the region (UV seams and protected edges cut most of the torso's), so LOD1/LOD2 mostly thin the arms, legs and fingers. On a tube-like part (one leg) LOD1/LOD2 work better.
 3. **Parallel processing?** Ask whether to build the versions in parallel, with agents each doing one version while you do one. Tell them the cost:
    - each agent used ~370k tokens and ~5 minutes in our run;
    - each runs its own background Blender (2–3 GB of RAM).
@@ -80,7 +80,7 @@ Fill in `scripts/avatar_config.py` from that, and **confirm every value with the
    - Compare again at the end and report "unchanged on N entries".
    - Round-trip through JSON before comparing: lists and tuples otherwise count as different.
 3. **Work on full duplicates only:** `o2 = o.copy(); o2.data = o.data.copy()`, in their own collection.
-   - Use names that can never match what the export picks up (`Body Retopo Neck Down L3`).
+   - Use names that can never match what the export picks up (`Body Retopo Neck Down LOD3`).
    - Hide that collection in the main view layer.
 4. **Read the source through a private copy** or read-only bmesh. Never `bm.to_mesh()` the original.
 5. **Don't save the user's .blend unless they say so.** A duplicate of a body with 500+ shape keys is ~200 MB: delete the versions they don't pick before saving.
@@ -115,7 +115,7 @@ Fill in `scripts/avatar_config.py` from that, and **confirm every value with the
 - **Note what covers the region.** A reduction can push skin through clothing.
 
 ## 4. Method A: edge-loop dissolve (exact data)
-Every remaining vertex and corner is an original one, so positions, all shape keys, weights, UVs, colours and custom attributes stay exact; only the faces get bigger. Work in place on a bmesh of the duplicate (`bm.from_mesh` … `bm.to_mesh`): Blender carries all shape keys and attributes through. `build_region.py` runs all of this for the configured region and the chosen levels: `ONLY=["L1", "L3 keys", ...]`, or pass your own `LEVELS`. The building blocks are in `leg_loops.py`.
+Every remaining vertex and corner is an original one, so positions, all shape keys, weights, UVs, colours and custom attributes stay exact; only the faces get bigger. Work in place on a bmesh of the duplicate (`bm.from_mesh` … `bm.to_mesh`): Blender carries all shape keys and attributes through. `build_region.py` runs all of this for the configured region and the chosen levels: `ONLY=["LOD1", "LOD3 keys", ...]`, or pass your own `LEVELS`. The building blocks are in `leg_loops.py`.
 
 ### 4.1 The steps
 1. **Multires:** delete the duplicate's higher Multires levels first (`bpy.ops.object.multires_higher_levels_delete`); displacement doesn't fit merged faces.
@@ -128,13 +128,13 @@ Every remaining vertex and corner is an original one, so positions, all shape ke
    - colour borders in any colour layer (e.g. nail masks; `COLOR_BORDER_LAYERS` narrows it);
    - non-manifold edges.
 5. **Find loops** through regular vertices (4 edges, 4 quads).
-   - `ends="closed"` takes rings only (L1/L2).
-   - `ends="any"` also takes open loops (L3).
+   - `ends="closed"` takes rings only (LOD1/LOD2).
+   - `ends="any"` also takes open loops (LOD3).
    - `ends="v3"` takes only open loops ending at 3-edge poles: triangles instead of pentagons.
 6. **Run the guards** (4.2) and drop every loop one of them rejects.
 7. **Pick every other loop:** a greedy maximum independent set, longest first. Two loops are neighbours when one quad has an edge of each as opposite sides; never remove two neighbours.
 8. **Dissolve:** `dissolve_edges(use_verts=False)`, then dissolve the vertices left with 2 edges. Only dissolve those whose faces are **all** inside the region, so faces outside are never touched. Delete loose vertices.
-9. **L2:** run a second pass of steps 5–8.
+9. **LOD2:** run a second pass of steps 5–8.
 10. **Clean the n-gons** (4.3), **then** Reset Vectors (4.4). Do it in that order: re-splitting faces after the reset leaves stale normals. That happened once and was off by up to 33° with a 29° seam.
 
 ### 4.2 Guards (a loop is kept when removing it would…)
@@ -148,7 +148,7 @@ Every remaining vertex and corner is an original one, so positions, all shape ke
 - **Shape keys** (`key_guard`, when the user wants protection): …change a key's offset by more than 1 mm compared with the offset interpolated between the vertex's neighbours across the loop.
   - Leave out the hide keys (`HIDE_KEY_PREFIXES`).
   - It reads the offsets by original index, so it needs the `retopo_orig` attribute.
-- **Shape** (`shape_guard`, 2 mm): …move a vertex more than 2 mm from the straight line between its neighbours across the loop. Without it, L3 lost 9–11 mm on the calves; with it, at most 4.7 mm.
+- **Shape** (`shape_guard`, 2 mm): …move a vertex more than 2 mm from the straight line between its neighbours across the loop. Without it, LOD3 lost 9–11 mm on the calves; with it, at most 4.7 mm.
 
 ### 4.3 N-gons
 - **Where they come from:** an open loop leaves a 5-sided face at each end, or a triangle where it ends at a 3-edge pole. Loop ends that bunch up merge into 6- to 27-sided faces.
@@ -245,7 +245,7 @@ Tested on a friend's body sent as a bare mesh: no armature, no weights, no head,
   - render `solid` when the textures are missing.
 - **Broken shape keys:** build without key protection and say the keys are carried over unchanged, so they're still broken. Fixing them is the owner's job.
 - **The file:** build in the user's open file only if they agree, as hidden duplicates, and remind them to delete those before saving their own avatar's file.
-- **On that body:** L1 kept the look almost entirely (51,494 → 40,950). L2 (36,550) softened the nipples. L3 (23,456) also made the top of the breast angular and left a shading facet. Small features need a keep mask even when the body has no colour mask: a UV island or a vertex group can serve.
+- **On that body:** LOD1 kept the look almost entirely (51,494 → 40,950). LOD2 (36,550) softened the nipples. LOD3 (23,456) also made the top of the breast angular and left a shading facet. Small features need a keep mask even when the body has no colour mask: a UV island or a vertex group can serve.
 
 ## 8. Pitfalls we hit
 - **"Looks the same" from an agent:** zoom into the feature crops yourself. One agent reported unchanged nipples that the close-up showed slightly softened.

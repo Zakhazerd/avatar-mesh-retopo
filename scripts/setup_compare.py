@@ -2,8 +2,8 @@
 default to avatar_config.py's (or the config named by CONFIG in the exec namespace).
 
     ns = {"__name__": "setup_compare"}; exec(open(path, encoding="utf-8").read(), ns)
-    ns["setup"]("ND", [("Body", "Original"), ("Body Retopo Neck Down L1", "L1"), ...])  # source first
-    ns["add_rig"]("ND", "L1")   # a posable armature copy for that lineup copy
+    ns["setup"]("ND", [("Body", "Original"), ("Body Retopo Neck Down LOD1", "LOD1"), ...])  # source first
+    ns["add_rig"]("ND", "LOD1")   # a posable armature copy for that lineup copy
     ns["show"]("ND")            # when finished: the user's view on the side-by-side lineup
     ns["remove"]("ND")          # takes it all down
 

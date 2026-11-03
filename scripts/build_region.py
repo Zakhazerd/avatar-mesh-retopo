@@ -1,17 +1,17 @@
 """Builds reduction levels of a body region as full duplicates of the body in the "<BODY> Retopo" collection
 (live Blender). Everything avatar-specific comes from avatar_config.py.
 
-    exec(open(path, encoding="utf-8").read(), {"__name__": "build_region", "ONLY": ["L3 keys"]})
+    exec(open(path, encoding="utf-8").read(), {"__name__": "build_region", "ONLY": ["LOD3 keys"]})
 
 ONLY names the levels to (re)build; without it nothing is built. CONFIG can name another avatar's config file
 (default: avatar_config.py next to this script). LEVELS can be passed in the same way to build
-other combinations. Default levels: "L1", "L2", "L3" ignore the shape keys (the Basis is the shape we want);
-"L1 keys", "L2 keys", "L3 keys" also keep every loop whose removal would change a shape key by more than 1 mm.
+other combinations. Default levels: "LOD1", "LOD2", "LOD3" ignore the shape keys (the Basis is the shape we want);
+"LOD1 keys", "LOD2 keys", "LOD3 keys" also keep every loop whose removal would change a shape key by more than 1 mm.
 A level's "extra" (or EXTRA in the exec namespace, for every level built) lists (area, passes): more passes in
 over-dense areas after the main pass, with the same loop rule and guards (areas: see area_mask).
 
 Region: by bone weight, by material or the whole mesh (see REGION_MODE in the config), minus the KEEP_MASKS,
-which stay at full detail. Loop rules as in leg_loops.py: L3 dissolves any clean loop once, L1 closed rings once, L2 closed rings
+which stay at full detail. Loop rules as in leg_loops.py: LOD3 dissolves any clean loop once, LOD1 closed rings once, LOD2 closed rings
 twice (all quads). A loop is kept when removing it would
   - let the skin poke through one of the GARMENTS (0.8 mm margin, their rest shapes);
   - change a shape key by more than 1 mm ("keys" levels; the HIDE_KEY_PREFIXES keys are not guarded);
@@ -35,12 +35,12 @@ SOURCE = CFG["BODY"]
 COLLECTION = f"{SOURCE} Retopo"
 # shape: shape-guard limit (m); keys: guard the shape keys; ends/passes: the loop rule
 DEFAULT_LEVELS = {
-    "L1": dict(shape=0.002, keys=False, ends="closed", passes=1),
-    "L2": dict(shape=0.002, keys=False, ends="closed", passes=2),
-    "L3": dict(shape=0.002, keys=False, ends="any", passes=1),
-    "L1 keys": dict(shape=0.002, keys=True, ends="closed", passes=1),
-    "L2 keys": dict(shape=0.002, keys=True, ends="closed", passes=2),
-    "L3 keys": dict(shape=0.002, keys=True, ends="any", passes=1),
+    "LOD1": dict(shape=0.002, keys=False, ends="closed", passes=1),
+    "LOD2": dict(shape=0.002, keys=False, ends="closed", passes=2),
+    "LOD3": dict(shape=0.002, keys=False, ends="any", passes=1),
+    "LOD1 keys": dict(shape=0.002, keys=True, ends="closed", passes=1),
+    "LOD2 keys": dict(shape=0.002, keys=True, ends="closed", passes=2),
+    "LOD3 keys": dict(shape=0.002, keys=True, ends="any", passes=1),
 }
 LEVELS = globals().get("LEVELS") or DEFAULT_LEVELS
 LEVELS = {k: v for k, v in LEVELS.items() if k in globals().get("ONLY", ())}

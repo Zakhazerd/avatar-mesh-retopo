@@ -3,7 +3,7 @@
 A Claude skill for lowering the triangle count of VRChat/avatar meshes in Blender without breaking shape keys, weights, UVs, vertex colours or normals.
 
 Claude works through a Blender MCP connection:
-- it asks which versions to build, up to six (loop levels L1/L2/L3, each with or without shape-key protection), and whether to build them in parallel with agents;
+- it asks which versions to build, up to six (loop levels LOD1/LOD2/LOD3, each with or without shape-key protection), and whether to build them in parallel with agents;
 - it checks for over-dense areas and asks whether to do more there;
 - it proves every result exact against the source;
 - it leaves you on a side-by-side comparison in Blender.
