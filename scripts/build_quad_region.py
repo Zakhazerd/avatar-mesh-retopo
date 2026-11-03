@@ -1,10 +1,11 @@
 """Builds the full-quad level of a body region ("Quad") as a full duplicate of the body in the "<BODY> Retopo"
 collection. Live or background Blender. Everything avatar-specific comes from avatar_config.py.
 
-Experimental, and only on request: on an artist-made body it lost to the loop levels (59,425 tris against LOD3's
-46,648) with patchwork topology, half of the new faces triangles. Run it only when the user asks for it by name.
+Experimental, and only on request: on an artist-made body, with the defaults below, it lost to the loop levels
+(59,423 tris against 46,648 for LOD3 with key protection) with patchwork topology, half of the new faces triangles.
+Run it only when the user asks for it by name.
 
-    exec(open(path, encoding="utf-8").read(), {"__name__": "build_quad_region", "DEV": 0.0015})
+    exec(open(path, encoding="utf-8").read(), {"__name__": "build_quad_region", "DEV": 0.002})
 
 The region and its keep masks are build_region.py's. The region is cut into islands at every border nothing may be
 interpolated across: UV seams in every UV map, jumps in a corner colour or corner attribute, material borders.
@@ -22,9 +23,10 @@ one spacing are the pieces; the borders between them are sampled at the finer sp
 is when its spacing would be under GAIN x its own edges (fingers, toes, nails: an even grid can't be coarser
 there), and so does a piece smaller than MIN_CELLS grid cells that is finer than everything around it.
 
-Settings (exec namespace): DEV (default 0.0015 m), N_MIN (12), H_MAX (0.03 m), STEP (0.9), GAIN (1.3),
-MIN_CELLS (6), TAG ("Quad"), DRY (True: report the plan and a budget table only, build nothing), CONFIG (another
-avatar's config file).
+Settings (exec namespace): DEV (default 0.002 m, like the loop levels' shape guard), N_MIN (10), H_MAX (0.03 m),
+STEP (0.9), GAIN (1.3), MIN_CELLS (6), JOIN_SHAPE (40 degrees), TAG ("Quad"), DRY (True: report the plan only,
+build nothing), BUDGET_DEVS (DEV values to estimate the triangle count for), CONFIG (another avatar's config file).
+Denser: lower DEV or H_MAX, or raise N_MIN; on an already efficient body more faces then stay as they are.
 
 Data: every vertex and corner outside the rebuilt pieces is the original one, exactly (weights too). New vertices
 lie on the original surface and take every shape key, weight (limited to 4 bones, normalised), UV, colour and
@@ -42,8 +44,8 @@ import numpy as np
 from mathutils.kdtree import KDTree
 
 HERE = r"<set me: the folder holding these scripts>"
-DEV = globals().get("DEV", 0.0015)
-N_MIN = globals().get("N_MIN", 12)
+DEV = globals().get("DEV", 0.002)
+N_MIN = globals().get("N_MIN", 10)
 H_MAX = globals().get("H_MAX", 0.03)
 STEP = globals().get("STEP", 0.9)
 GAIN = globals().get("GAIN", 1.3)
@@ -121,7 +123,8 @@ def plan(src, region_face, nb, area, hv):
     for f in np.nonzero(level >= 0)[0]:
         grown[f] = max([level[f]] + [level[g] for g in nb[f] if level[g] >= 0])
     level = grown
-    for _ in range(8):  # small pieces join a finer neighbour, or stay as they are when nothing around is finer
+
+    def components():
         comp, comps = np.full(nf, -1), []
         for f in np.nonzero(level >= 0)[0]:
             if comp[f] >= 0:
@@ -135,6 +138,9 @@ def plan(src, region_face, nb, area, hv):
                         members.append(g)
                         st.append(g)
             comps.append(members)
+        return comp, comps
+    for _ in range(8):  # small pieces join a finer neighbour, or stay as they are when nothing around is finer
+        comp, comps = components()
         changed = False
         for c, members in enumerate(comps):
             k = level[members[0]]
@@ -145,6 +151,7 @@ def plan(src, region_face, nb, area, hv):
             changed = True
         if not changed:
             break
+    comp, comps = components()  # the pieces as they ended up, also when the passes ran out while still changing
     hmap = {c: H_MAX * STEP ** level[m[0]] for c, m in enumerate(comps)}
     est = sum(2 * area[m].sum() / hmap[c] ** 2 for c, m in enumerate(comps))
     est += sum(len(src.bm.faces[f].verts) - 2 for f in np.nonzero(level == -1)[0])

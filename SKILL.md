@@ -57,7 +57,7 @@ Fill in `scripts/avatar_config.py` from that, and **confirm every value with the
        | Quad version | Tris | What it looked like |
        |---|---|---|
        | one spacing per piece (an earlier test build, not kept in the scripts) | 53,118 | clean quads on legs and arms; faceted breasts, a pinched cleft between the buttocks, lost creases |
-       | adaptive (finer where it curves, 2 mm deviation; `build_quad_region.py`) | 59,425 | the shape holds, but the topology is a patchwork: 143 density patches, and half the new faces are triangles |
+       | adaptive (finer where it curves, 2 mm deviation; `build_quad_region.py`) | 59,423 | the shape holds, but the topology is a patchwork: 143 density patches, and half the new faces are triangles |
 
        LOD3 keys got 46,648 with exact data. **For a body, leave Quad out of the menu.** Don't offer or suggest it. Build it only when the user already knows about it and asks for it by name; then show them these numbers and the topology before building (4.7).
 3. **Parallel processing?** Ask whether to build the versions in parallel, with agents each doing one version while you do one. Tell them the cost:
@@ -197,7 +197,8 @@ Every piece is flattened with a minimum-stretch unwrap on a temporary copy of th
 - **Spacing:** a deviation limit like the shape guard (`DEV`, a quad's centre at most that far off the surface) and a minimum number of edges around a curve (`N_MIN`).
 - **Read curvature at the scale of the spacing:** fit a quadric to the vertices within half a quad's diagonal. A per-edge curvature mostly reads mesh noise (it flagged a quarter of our chest as tighter than 25 mm), and a Laplacian measure reads a cylinder as twice its radius.
 - **Pieces that can't gain stay as they are:** an even grid can't be coarser than fingers or toes already are.
-- **Check it** with `verify_quad.py`, against the source's own counts of open and non-manifold edges. On our body the outside stayed exact: positions, 564 keys, weights, UVs, colours, attributes, and normals within 0.08°. But the adaptive build still left 7 open edges, 14 non-manifold edges and 4 zero-area faces where its smallest density pieces meet. Report or fix those before anyone uses it.
+- **Denser on request:** lower `DEV` or `H_MAX`, or raise `N_MIN`. On an already efficient body this mostly leaves more faces as they were (at 1 mm and 12 edges around, ~16k of the region's faces stayed and the estimate was ~61.6k) rather than giving a denser grid, and the patchwork stays.
+- **Check it** with `verify_quad.py`, against the source's own counts of open and non-manifold edges. On our body the outside stayed exact: positions, 564 keys, weights, UVs, colours, attributes, normals within 0.08°, and a border seam of 0.034°, the same as the original's. But the adaptive build still left 7 open edges, 14 non-manifold edges and 4 zero-area faces where its smallest density pieces meet. Report or fix those before anyone uses it.
 
 **Why it loses on a body:** loop removal drops whole loops in one direction wherever the shape allows. An even grid has to get coarser in both directions at once, so it gains only where a surface is flat both ways.
 

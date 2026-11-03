@@ -8,9 +8,10 @@ should match it, degenerate faces be 0.
 
 Exact part (vertices with a source vertex): positions, every shape key, weights, point attributes; corner values at
 those vertices within 1e-5 of one of the source's corner values there; every face outside the region present with
-the same corners. New part: weights (influences, sums), face orientation against the source surface, mesh
-health, faces by sides. Normals: outside corners against the source, region corners against a true reset, the
-border seam."""
+the same corners. New part: weights (influences, sums), faces facing against the nearest source face (surfaces
+that touch, like a cleavage, count too: compare places, not only the number), mesh health, faces by sides.
+Normals: outside corners against the source, region corners against a true reset, and the border seam (the widest
+angle between a region corner and an outside corner at one vertex) next to the same in the source."""
 import json
 import sys
 
@@ -43,7 +44,7 @@ def co(me):
 
 out["positions_exact"] = bool(np.array_equal(co(v)[ex], co(b)[oi[ex]]))
 bad = []
-for kb in b.shape_keys.key_blocks:
+for kb in (b.shape_keys.key_blocks if b.shape_keys else []):
     kv = v.shape_keys.key_blocks.get(kb.name)
     a, c = np.empty(len(b.vertices) * 3, np.float32), np.empty(len(v.vertices) * 3, np.float32)
     kb.data.foreach_get("co", a)
@@ -51,12 +52,14 @@ for kb in b.shape_keys.key_blocks:
     if not np.array_equal(c.reshape(-1, 3)[ex], a.reshape(-1, 3)[oi[ex]]) or kb.value != kv.value or \
             kb.relative_key.name != kv.relative_key.name or (kb.slider_min, kb.slider_max) != (kv.slider_min, kv.slider_max):
         bad.append(kb.name)
-out["keys"] = {"source": len(b.shape_keys.key_blocks), "variant": len(v.shape_keys.key_blocks), "differ_on_exact": bad[:10],
+out["keys"] = {"source": len(b.shape_keys.key_blocks) if b.shape_keys else 0,
+               "variant": len(v.shape_keys.key_blocks) if v.shape_keys else 0, "differ_on_exact": bad[:10],
                "n_differ": len(bad)}
 wb = [sorted((g.group, round(g.weight, 7)) for g in x.groups) for x in b.vertices]
 out["weights_exact"] = sum(1 for i in np.nonzero(ex)[0] if sorted((g.group, round(g.weight, 7)) for g in v.vertices[i].groups) != wb[oi[i]])
-arm = next(m.object for m in bo.modifiers if m.type == "ARMATURE")
-deform = {i for i, g in enumerate(vo.vertex_groups) if g.name in arm.data.bones and arm.data.bones[g.name].use_deform}
+arm = next((m.object for m in bo.modifiers if m.type == "ARMATURE" and m.object), None)
+deform = {i for i, g in enumerate(vo.vertex_groups)
+          if arm is None or (g.name in arm.data.bones and arm.data.bones[g.name].use_deform)}
 infl = [[g.weight for g in v.vertices[i].groups if g.group in deform and g.weight > 1e-5] for i in np.nonzero(~ex)[0]]
 out["new_weights"] = {"max_influences": max((len(x) for x in infl), default=0),
                       "sum_min": round(min((sum(x) for x in infl), default=1.0), 4),
@@ -138,7 +141,7 @@ ref.corner_normals.foreach_get("vector", nr)
 nr = nr.reshape(-1, 3)
 bpy.data.meshes.remove(ref)
 border_verts = {v.loops[li].vertex_index for f in outside_set for li in v.polygons[f].loop_indices}
-reg_dev, ring_seam = [], 0.0
+reg_dev = []
 for p in v.polygons:
     if p.index in outside_set:
         continue
@@ -146,14 +149,24 @@ for p in v.polygons:
         if v.loops[li].vertex_index in border_verts:
             continue
         reg_dev.append(float(np.degrees(np.arccos(np.clip(nv_[li] @ nr[li], -1, 1)))))
-seam = {}
-for li in range(len(v.loops)):
-    seam.setdefault(int(lv_v[li]), []).append(nv_[li])
-for vert in border_verts:
-    ns_ = seam[vert]
-    ring_seam = max(ring_seam, max(float(np.degrees(np.arccos(np.clip(x @ y, -1, 1)))) for x in ns_ for y in ns_))
+
+
+def border_seam(me, normals, outside_faces):
+    """The widest angle between a region corner and an outside corner at the same vertex."""
+    reg, outn = {}, {}
+    for p in me.polygons:
+        d = outn if p.index in outside_faces else reg
+        for li in p.loop_indices:
+            d.setdefault(me.loops[li].vertex_index, []).append(normals[li])
+    worst = 0.0
+    for vert in set(reg) & set(outn):
+        worst = max(worst, max(float(np.degrees(np.arccos(np.clip(x @ y, -1, 1)))) for x in reg[vert] for y in outn[vert]))
+    return round(worst, 3)
+
+
 out["region_normals_vs_true_reset_deg"] = {"max": round(max(reg_dev), 4), "p99": round(float(np.percentile(reg_dev, 99)), 4)}
-out["border_ring_spread_deg_max"] = round(ring_seam, 3)
+out["border_seam_deg"] = {"version": border_seam(v, nv_, outside_set),
+                          "source": border_seam(b, nb_, {cb[c] for c in outside})}
 
 # orientation against the source surface, mesh health, sides
 bco = co(b)
