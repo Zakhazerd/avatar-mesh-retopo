@@ -14,6 +14,11 @@ optionally `h` (target edge length in metres).
 4. Folds the flattening can't hold (flipped or overlapping triangles, inconsistent winding), plus one ring
    around them, are frozen: those original faces are kept as they are, and chains touching them keep
    every original vertex.
+
+Body regions (build_quad_region.py): pass `remesh` (a bool per source face). Only those faces are rebuilt; every
+other face, from any connected part, is copied as it is, and the border keeps every original vertex. `pieces`
+(a piece number per face) splits islands into areas rebuilt at different spacings, and `h` may then be a dict
+{piece: spacing}; a chain shared by two pieces is sampled at the finer one.
 """
 import math
 
@@ -32,22 +37,40 @@ JOIN_SHAPE = 40.0  # degrees, bmesh join_triangles shape threshold
 INSIDE_TOL = 1e-6  # FlatUV units (~1.3 um); the 2D BVH works in float32, so inside points read ~1e-8 away
 
 
-def pattern_spec(src, ns, h, extra_frozen=()):
-    """extra_frozen: original faces to keep as they are too (where an earlier pass made layers intersect)."""
+def pattern_spec(src, ns, h, extra_frozen=(), remesh=None, pieces=None):
+    """extra_frozen: original faces to keep as they are too (where an earlier pass made layers intersect).
+    remesh: faces to rebuild (None: the main part, whose other parts the caller rebuilds, e.g. buttons).
+    pieces: a piece number per face, to split islands further (areas of one island rebuilt at different
+    spacings share its flattening; the borders between them become chains). None: the islands."""
     bm = src.bm
     flat = src.flat
-    isl = src.island
-    main_faces = [f for f in bm.faces if src.comp[f.verts[0].index] == src.main]
-    main_isl = sorted({int(isl[f.index]) for f in main_faces})
+    isl = src.island if pieces is None else np.asarray(pieces)
+    if remesh is None:
+        scope = np.array([src.comp[f.verts[0].index] == src.main for f in bm.faces])
+        remesh = scope
+    else:
+        scope = np.ones(len(bm.faces), bool)
 
-    # ---------------- frozen faces
+    def piece_h(i):
+        return h[i] if isinstance(h, dict) else h
+    main_faces = [f for f in bm.faces if scope[f.index]]
+    main_isl = sorted({int(isl[f.index]) for f in main_faces if remesh[f.index]})
+
+    # ---------------- frozen faces (folds and overlaps are found per island, in its flattening)
     tri_isl = isl[src.tri_face]
+    tri_src_isl = src.island[src.tri_face]
     a2 = flat[src.tri_loops]
     e2 = a2[:, 1:] - a2[:, :1]
     s2 = 0.5 * (e2[:, 0, 0] * e2[:, 1, 1] - e2[:, 0, 1] * e2[:, 1, 0])
+    if pieces is None:
+        scale = src.scale
+    else:  # metres per FlatUV unit, per piece
+        a3 = src.co[src.loop_vert[src.tri_loops]]
+        area3 = 0.5 * np.linalg.norm(np.cross(a3[:, 1] - a3[:, 0], a3[:, 2] - a3[:, 0]), axis=1)
+        scale = {i: math.sqrt(area3[tri_isl == i].sum() / max(np.abs(s2[tri_isl == i]).sum(), 1e-30)) for i in main_isl}
     frozen = set()
-    for i in main_isl:
-        m = tri_isl == i
+    for i in sorted({int(src.island[f.index]) for f in main_faces if remesh[f.index]}):
+        m = tri_src_isl == i
         sign = np.sign(s2[m].sum())
         frozen |= set(src.tri_face[m & (np.sign(s2) != sign)].tolist())
         tree, tris = src.loc[i]
@@ -62,7 +85,8 @@ def pattern_spec(src, ns, h, extra_frozen=()):
             if l1.vert == l2.vert:
                 frozen |= {f.index for f in e.link_faces}
     frozen |= set(extra_frozen)
-    frozen = {f for f in frozen if src.comp[bm.faces[f].verts[0].index] == src.main}
+    frozen |= set(np.nonzero(scope & ~remesh)[0].tolist())
+    frozen = {f for f in frozen if scope[f]}
     for _ in range(FREEZE_RINGS):
         grow = set()
         for fi in frozen:
@@ -96,7 +120,7 @@ def pattern_spec(src, ns, h, extra_frozen=()):
 
     # ---------------- chains
     def live_faces(e):
-        return [f for f in e.link_faces if not is_frozen[f.index] and src.comp[f.verts[0].index] == src.main]
+        return [f for f in e.link_faces if not is_frozen[f.index] and scope[f.index]]
 
     def edge_sig(e):
         lf = live_faces(e)
@@ -105,8 +129,10 @@ def pattern_spec(src, ns, h, extra_frozen=()):
         touches = len(lf) < len(e.link_faces)
         c = int(src.edge_class[e.index])
         if c == 0 and not touches:
-            return None
-        if c == 0:
+            if len({int(isl[f.index]) for f in lf}) == 1:
+                return None
+            c = 6  # border between two pieces of one island
+        elif c == 0:
             c = 5  # border of a frozen zone
         return (c, bool(src.sharp[e.index]), frozenset(int(isl[f.index]) for f in lf), touches)
 
@@ -177,7 +203,7 @@ def pattern_spec(src, ns, h, extra_frozen=()):
         if s[3]:  # touches a frozen zone: keep every vertex
             targets = list(cum[1:-1])
         else:
-            n = max(1, int(round(L / h)))
+            n = max(1, int(round(L / min(piece_h(i) for i in s[2]))))
             targets = [j * L / n for j in range(1, n)]
         for st in targets:
             i = min(int(np.searchsorted(cum, st, side="right")) - 1, len(edges) - 1)
@@ -262,7 +288,7 @@ def pattern_spec(src, ns, h, extra_frozen=()):
         d = np.linalg.solve(M, np.array([1.0, 0.0]))
         ax = d / np.linalg.norm(d)
         ay = np.array([-ax[1], ax[0]])
-        h2 = h / src.scale[I]
+        h2 = piece_h(I) / scale[I]
         P = flat[loops]
         u, w = P @ ax, P @ ay
         kd_pts = []
@@ -300,6 +326,9 @@ def pattern_spec(src, ns, h, extra_frozen=()):
         tris = []
         for f in fout:
             if any(out_g[k] is None for k in f):
+                continue
+            a, b, c = (vout[k] for k in f)
+            if abs((b - a).cross(c - a)) < 1e-6 * h2 * h2:  # three samples in a row on one chain: no face
                 continue
             c = sum((vout[k] for k in f), Vector((0, 0))) / 3
             if tree.find_nearest(Vector((c.x, c.y, 0.0)))[3] > INSIDE_TOL:
@@ -359,9 +388,11 @@ def pattern_spec(src, ns, h, extra_frozen=()):
         spec.add_face(vs, corners, fixed=True)
     stats["piece_votes"] = {int(k): v for k, v in votes.items()}
 
-    # ---------------- frozen faces, copied as they are
+    # ---------------- frozen faces, copied as they are (spec.copied: new face -> source face)
+    spec.copied = {}
     for fi in sorted(frozen):
         f = bm.faces[fi]
+        spec.copied[len(spec.faces)] = fi
         spec.add_face([vert_gid(v.index) for v in f.verts], [[(src.face_loop_at(f, v), 1.0)] for v in f.verts], fixed=True)
         for e in f.edges:
             if src.sharp[e.index]:
@@ -369,4 +400,5 @@ def pattern_spec(src, ns, h, extra_frozen=()):
     return spec, stats
 
 
-spec_c, info_c = pattern_spec(src, ns, h, globals().get("extra_frozen", ()))
+spec_c, info_c = pattern_spec(src, ns, h, globals().get("extra_frozen", ()), globals().get("remesh"),
+                              globals().get("pieces"))

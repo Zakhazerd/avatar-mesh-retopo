@@ -1,16 +1,16 @@
 ---
 name: avatar-mesh-retopo
-description: Lower the triangle count of a VRChat/avatar mesh in Blender (through a Blender MCP connection) without breaking shape keys, weights, UVs, vertex colours or normals. The user picks up to six versions (loop levels LOD1/LOD2/LOD3, each with or without shape-key protection), which can be built in parallel by agents. Covers backups and full duplicates, edge-loop dissolve that keeps clean quads, guards for clothing, shape keys, silhouette and small features, data-exact verification, n-gon cleanup, background comparison renders, metrics, and an in-Blender comparison with a posable rig. Use when asked to reduce an avatar's polycount, retopo a garment or body part, or compare mesh reduction methods.
+description: Lower the triangle count of a VRChat/avatar mesh in Blender (through a Blender MCP connection) without breaking shape keys, weights, UVs, vertex colours or normals. The user picks up to six versions (loop levels LOD1/LOD2/LOD3, each with or without shape-key protection), which can be built in parallel by agents, plus a full-quad rebuild (an even quad grid per piece, best for garments). Covers backups and full duplicates, edge-loop dissolve that keeps clean quads, guards for clothing, shape keys, silhouette and small features, data-exact verification, n-gon cleanup, background comparison renders, metrics, and an in-Blender comparison with a posable rig. Use when asked to reduce an avatar's polycount, retopo a garment or body part, or compare mesh reduction methods.
 ---
 
 # Avatar mesh retopo in Blender
 
 A tested workflow for cutting triangles on skinned avatar meshes (clothing and bodies with hundreds of shape keys) so the result can ship to Unity/VRChat. It was worked out on one avatar:
 
-- **A Marvelous Designer shirt:** 22,246 → 9,595 tris.
+- **A Marvelous Designer shirt:** 22,246 → 9,595 tris by loop dissolve, or 9,862 as an even quad grid.
 - **A body with 564 shape keys, neck down:** 62,686 → 45,086 tris. Every kept vertex has exactly its original data.
 
-The scripts in `scripts/` are general. Everything avatar-specific is in **`scripts/avatar_config.py`**, which every script reads: object names, garments, the region, feature masks, hide keys, bone roles and facing direction, check textures. Set the `HERE` path at the top of the live-Blender scripts (`build_region.py`, `density_report.py`, `build_variants.py`, `setup_compare.py`; marked `<set me ...>`), and fill in the config before anything else (section 1).
+The scripts in `scripts/` are general. Everything avatar-specific is in **`scripts/avatar_config.py`**, which every script reads: object names, garments, the region, feature masks, hide keys, bone roles and facing direction, check textures. Set the `HERE` path at the top of the scripts that load the others (`build_region.py`, `density_report.py`, `build_variants.py`, `build_quad_region.py`, `verify_quad.py`, `setup_compare.py`; marked `<set me ...>`), and fill in the config before anything else (section 1).
 
 ## 0. Model: Opus 5.5 or better
 - **Why it matters:** this workflow is long and check-heavy, with dozens of live-Blender steps, exactness proofs, n-gon reviews and reading renders. The mistakes it guards against are easy to miss: data that's no longer exact, n-gons reported as "five-sided" when they're 27-sided slivers, skin poking through a stocking, a normals seam.
@@ -50,6 +50,16 @@ Fill in `scripts/avatar_config.py` from that, and **confirm every value with the
    - **With shape-key protection:** a loop is kept wherever removing it would change any shape key by more than 1 mm. It costs a little: LOD3 went from 45,086 to 46,648.
    - **Without it:** the Basis is treated as the final shape. Keys still transfer exactly on every kept vertex, but they lose the detail of the removed loops. On our body, a garter-squeeze key lost up to 5–7 mm.
    - **Why rings reduce so little:** on a body, few closed rings stay unbroken inside the region (UV seams and protected edges cut most of the torso's), so LOD1/LOD2 mostly thin the arms, legs and fingers. On a tube-like part (one leg) LOD1/LOD2 work better.
+   - **Plus a full-quad rebuild ("Quad", section 4.7):** every piece is rebuilt as an even quad grid in its own flattened space. Its data is interpolated from the original, not exact. Offer it by what's being reduced:
+     - **A garment** (Marvelous Designer, a scan, a decimated sculpt: dense, uneven triangles): a good choice. Our shirt went 22,246 → 9,862 tris at 16 mm spacing (7,779 at 20 mm): an even grid along the fabric grain, seams welded, rolled hems crisp, within 2.7 mm of the original for 95% of its vertices. Its owner still preferred loop dissolve after comparing them, so build both and let them look.
+     - **An artist-made body:** tested on ours from the neck down, and not worth it. Its torso and legs already have about as many edges around each curve as the shape needs, and hands, feet and toes can't take an even grid any coarser, so a grid only gains where the body is flat:
+
+       | Quad version | Tris | What it looked like |
+       |---|---|---|
+       | one spacing per piece | 53,118 | clean quads on legs and arms; faceted breasts, a pinched cleft between the buttocks, lost creases |
+       | adaptive (finer where it curves, 2 mm deviation) | 59,425 | the shape holds, but 143 density patches and half the new faces are triangles |
+
+       LOD3 keys got 46,648 with exact data. Offer Quad for a body only if the user asks, show them these numbers, and treat it as experimental (4.7).
 3. **Parallel processing?** Ask whether to build the versions in parallel, with agents each doing one version while you do one. Tell them the cost:
    - each agent used ~370k tokens and ~5 minutes in our run;
    - each runs its own background Blender (2–3 GB of RAM).
@@ -173,6 +183,24 @@ A millimetre guard can't protect a small feature. Thinning the nipple turned it 
 ### 4.6 Irregular garments
 For Marvelous Designer clothes (`variant_a_loops.py`), you can also dissolve open loops in both directions, with a union-find parity so neighbouring lines never both go. That gives larger cuts (the shirt: 22,246 → 9,595) but leaves n-gons and uneven density. Say so, and clean them as in 4.3.
 
+### 4.7 Method C: full-quad rebuild (interpolated data)
+Every piece is flattened with a minimum-stretch unwrap on a temporary copy of the mesh, then rebuilt (`variant_c_pattern.py`). For a garment a piece is a UV island. For a body, `Source(obj, seams="all")` also splits at seams in every other UV map, at jumps in any corner colour or corner attribute, and at material borders, so nothing is interpolated across a mask or a second UV layout.
+1. **Chains:** open edges, seams, creases and borders are split at corners and resampled at even arc length along the original edges. Neighbouring pieces get the same new vertices (no cracks) and creases stay crisp. A chain that touches kept faces keeps every original vertex.
+2. **Grid:** a square grid at the piece's spacing, aligned with its UV grain, then a constrained Delaunay triangulation (`mathutils.geometry.delaunay_2d_cdt`) and `join_triangles` into quads.
+   - **Drop zero-area triangles:** three samples in a row on a chain. The centre of such a triangle sits on the border, so an inside test lets it through, and each one leaves an open edge next to an edge with three faces.
+3. **Data:** each new vertex and corner is a barycentric point on an original triangle of the same piece. That gives positions on the original surface, every shape key, weights (deform bones limited to 4 and normalised, as Unity does), UVs, colours, point/corner/face attributes and materials. Faces copied as they are stay exact; `write_variant(..., limit_all=False)` keeps their weights as they were, zero entries included.
+4. **Kept as they are:** folds the flattening can't hold (flipped or overlapping triangles, inconsistent winding). For garments, also the faces under new self-intersections: `build_variants.py` rebuilds until there are none.
+
+**Garments:** `build_variants.py` builds C (16 mm) and D (20 mm), with buttons rebuilt at 8 segments. Check the poke-through and the layered parts (collar, placket) in the sheets.
+
+**Body regions (experimental):** `build_quad_region.py`. It uses the region and keep masks of `build_region.py` and Reset Vectors as in 4.4.
+- **Spacing:** a deviation limit like the shape guard (`DEV`, a quad's centre at most that far off the surface) and a minimum number of edges around a curve (`N_MIN`).
+- **Read curvature at the scale of the spacing:** fit a quadric to the vertices within half a quad's diagonal. A per-edge curvature mostly reads mesh noise (it flagged a quarter of our chest as tighter than 25 mm), and a Laplacian measure reads a cylinder as twice its radius.
+- **Pieces that can't gain stay as they are:** an even grid can't be coarser than fingers or toes already are.
+- **Check it** with `verify_quad.py`, against the source's own counts of open and non-manifold edges. On our body the outside stayed exact: positions, 564 keys, weights, UVs, colours, attributes, and normals within 0.08°. But the adaptive build still left 7 open edges, 14 non-manifold edges and 4 zero-area faces where its smallest density pieces meet. Report or fix those before anyone uses it.
+
+**Why it loses on a body:** loop removal drops whole loops in one direction wherever the shape allows. An even grid has to get coarser in both directions at once, so it gains only where a surface is flat both ways.
+
 ## 5. Parallel processing (when the user said yes)
 1. **Prepare the config and the levels yourself first:** every version is a named level (`LEVELS` + `ONLY=[...]` in `build_region.py`). Agents must not edit shared scripts or the config.
 2. **Build one level yourself to validate the script,** then dispatch: one agent per version, and you take one.
@@ -274,7 +302,8 @@ Tested on a friend's body sent as a bare mesh: no armature, no weights, no head,
 | `leg_loops.py` | Method A building blocks: triangle join, protected edges, loop finder (closed/v3/any), greedy pick, dissolve; guards (`cover_guard`, `key_guard`, `shape_guard`); `fix_ngons`, `pair_pentagons`, regional Reset Vectors |
 | `verify_region_variant.py` | Exactness check against the source, with the build's index map |
 | `retopo_lib.py` | Fingerprints, `ngon_review`, the garment source snapshot, flattening and barycentric locator, `write_variant`, button rebuild, intersection checks |
-| `variant_a_loops.py` / `variant_b_decimate.py` / `variant_c_pattern.py` / `build_variants.py` | Garment methods and their runner (the config's `GARMENT`) |
+| `variant_a_loops.py` / `variant_b_decimate.py` / `variant_c_pattern.py` / `build_variants.py` | Garment methods and their runner (the config's `GARMENT`); C and D are the full-quad rebuild |
+| `build_quad_region.py` / `verify_quad.py` | Experimental full-quad rebuild of a body region (live or background), and its check in background Blender: exact outside, weights, normals, mesh health against the source |
 | `render_views.py`, `poses.py`, `compose.py` | Background renders framed by bone roles, test poses (arms up, bent over, deep sit, fist), sheets from several render folders |
 | `metrics.py` | Distances with worst spots, shape-key and pose checks, poke-through per garment |
 | `setup_compare.py` | Comparison view layers + lineup in the live file, `add_rig()`, `show()` (the finishing view), `remove()` |

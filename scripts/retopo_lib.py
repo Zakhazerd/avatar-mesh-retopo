@@ -73,10 +73,15 @@ def tri_count(obj):
 
 # ---------------------------------------------------------------- source snapshot
 class Source:
-    """Read-only arrays and topology of the source garment, taken from a private copy of its mesh."""
+    """Read-only arrays and topology of the source garment, taken from a private copy of its mesh.
 
-    def __init__(self, obj):
+    seams="UVMap": pieces are split at UVMap seams (a Marvelous Designer garment). seams="all": also at seams of
+    every other UV map, jumps in any corner colour or corner attribute, and material borders, so nothing is ever
+    interpolated across a border (a body: second UV maps, nail and skin masks, a face material)."""
+
+    def __init__(self, obj, seams="UVMap"):
         self.obj = obj
+        self.seams = seams
         me = self.me = obj.data.copy()
         me.name = obj.data.name + " (retopo read copy)"
         n, L = len(me.vertices), len(me.loops)
@@ -96,9 +101,12 @@ class Source:
             self.key_settings = {"use_relative": me.shape_keys.use_relative}
         self.groups = [g.name for g in obj.vertex_groups]
         self.weights = np.zeros((n, len(self.groups)), np.float64)
+        self.tiny_weights = {}  # vertex -> [(group, weight)] memberships at <= 1e-5 (often 0), which W can't show
         for v in me.vertices:
             for g in v.groups:
                 self.weights[v.index, g.group] = g.weight
+                if g.weight <= 1e-5:
+                    self.tiny_weights.setdefault(v.index, []).append((g.group, g.weight))
         arm = next((m.object for m in obj.modifiers if m.type == "ARMATURE" and m.object), None)
         deform = {b.name for b in arm.data.bones if b.use_deform} if arm else set()
         self.deform_cols = np.array([i for i, g in enumerate(self.groups) if g in deform], np.int64)
@@ -141,6 +149,23 @@ class Source:
         self.sharp = np.zeros(len(me.edges), bool)
         if me.attributes.get("sharp_edge"):
             me.attributes["sharp_edge"].data.foreach_get("value", self.sharp)
+        self.face_mat = np.empty(len(me.polygons), np.int64)
+        me.polygons.foreach_get("material_index", self.face_mat)
+        # other named point, corner and face attributes (e.g. a float mask), carried over by write_variant
+        handled = {"position", "custom_normal", "sharp_edge", "material_index"} | set(self.uv_names) | set(self.colors)
+        width = {"FLOAT": 1, "INT": 1, "INT8": 1, "BOOLEAN": 1, "FLOAT2": 2, "FLOAT_VECTOR": 3, "FLOAT_COLOR": 4}
+        self.extra, self.skipped_attrs = [], []
+        for a in me.attributes:
+            if a.name in handled or a.name.startswith("."):
+                continue
+            n_dom = {"POINT": n, "CORNER": L, "FACE": len(me.polygons)}.get(a.domain)
+            if n_dom is None or a.data_type not in width:
+                self.skipped_attrs.append((a.name, a.domain, a.data_type))
+                continue
+            prop = {"FLOAT2": "vector", "FLOAT_VECTOR": "vector", "FLOAT_COLOR": "color"}.get(a.data_type, "value")
+            arr = np.empty(n_dom * width[a.data_type], bool if a.data_type == "BOOLEAN" else np.float64)
+            a.data.foreach_get(prop, arr)
+            self.extra.append((a.name, a.domain, a.data_type, prop, arr.reshape(n_dom, -1).astype(np.float64)))
 
         bm = self.bm = bmesh.new()
         bm.from_mesh(me)
@@ -191,12 +216,18 @@ class Source:
 
     def _uv_disc(self, e):
         f1, f2 = e.link_faces
-        uv = self.uvs["UVMap"]
-        for v in e.verts:
-            a = uv[self.face_loop_at(f1, v)]
-            b = uv[self.face_loop_at(f2, v)]
-            if np.abs(a - b).max() > 1e-6:
+        if self.seams == "all":
+            if self.face_mat[f1.index] != self.face_mat[f2.index]:
                 return True
+            layers = (list(self.uvs.values()) + list(self.colors.values())
+                      + [a for _, dom, _, _, a in self.extra if dom == "CORNER"])
+        else:
+            layers = [self.uvs["UVMap"]]
+        for v in e.verts:
+            la, lb = self.face_loop_at(f1, v), self.face_loop_at(f2, v)
+            for data in layers:
+                if np.abs(data[la] - data[lb]).max() > 1e-6:
+                    return True
         return False
 
     def _edge_classes(self):
@@ -248,6 +279,7 @@ class Source:
         try:
             if tmp_me.shape_keys:
                 tmp.active_shape_key_index = 0
+                tmp.shape_key_clear()  # the unwrap only needs the rest shape; hundreds of keys slow Edit Mode down
             for o in prev_sel:
                 o.select_set(False)
             tmp.select_set(True)
@@ -256,11 +288,13 @@ class Source:
             tmp_me.edges.foreach_set("use_seam", seams.tolist())
             fu = tmp_me.uv_layers.new(name="FlatUV")
             tmp_me.uv_layers.active = fu
-            win = bpy.context.window_manager.windows[0]
-            area = next(a for a in win.screen.areas if a.type == "VIEW_3D")
-            region = next(r for r in area.regions if r.type == "WINDOW")
-            with bpy.context.temp_override(window=win, area=area, region=region, active_object=tmp, object=tmp,
-                                           selected_objects=[tmp], selected_editable_objects=[tmp]):
+            ctx = dict(active_object=tmp, object=tmp, selected_objects=[tmp], selected_editable_objects=[tmp])
+            if bpy.context.window_manager.windows:  # live Blender; background Blender has no window
+                win = bpy.context.window_manager.windows[0]
+                area = next(a for a in win.screen.areas if a.type == "VIEW_3D")
+                region = next(r for r in area.regions if r.type == "WINDOW")
+                ctx.update(window=win, area=area, region=region)
+            with bpy.context.temp_override(**ctx):
                 bpy.ops.object.mode_set(mode="EDIT")
                 bpy.ops.mesh.select_mode(type="FACE")
                 bpy.ops.mesh.select_all(action="SELECT")
@@ -400,9 +434,11 @@ def get_collection():
     return col
 
 
-def write_variant(src, tag, spec):
+def write_variant(src, tag, spec, limit_all=True):
     """Builds '<source> Retopo <tag>' as a full duplicate of the source and replaces its geometry with spec.
-    Replaces an earlier variant with the same tag (only objects inside the retopo collection)."""
+    Replaces an earlier variant with the same tag (only objects inside the retopo collection). limit_all=False
+    limits only the new (interpolated) vertices to MAX_INFLUENCES bones, so copied vertices keep their weights
+    exactly (a body whose untouched part must stay as it was)."""
     col = get_collection()
     name = f"{src.obj.name} Retopo {tag}"
     assert name != src.obj.name
@@ -421,6 +457,9 @@ def write_variant(src, tag, spec):
     o2.name = name
     me = o2.data
     me.name = f"{src.obj.data.name} Retopo {tag}"
+    for m in [m for m in o2.modifiers if m.type == "MULTIRES"]:  # displacement doesn't fit the new faces
+        with bpy.context.temp_override(object=o2, active_object=o2, selected_objects=[o2]):
+            bpy.ops.object.multires_higher_levels_delete(modifier=m.name)
     o2.shape_key_clear()
     me.clear_geometry()
     for a in [a.name for a in me.attributes if not a.name.startswith(".") and a.name not in ("position",)]:
@@ -468,6 +507,20 @@ def write_variant(src, tag, spec):
         c.data.foreach_set("color_srgb", np.clip(interp(src.colors[cname], cidx, cw), 0, 1).ravel())
     me.color_attributes.active_color = me.color_attributes[src.active_color]
     me.color_attributes.render_color_index = [c.name for c in me.color_attributes].index(src.render_color)
+    # material and face attributes from the source face under each face's first corner
+    first = np.cumsum([0] + [len(cs) for cs in spec.csrc[:-1]])
+    face_src = src.loop_face[cidx[first, np.argmax(cw[first], axis=1)]]
+    me.polygons.foreach_set("material_index", src.face_mat[face_src].tolist())
+    for aname, dom, dtype, prop, arr in src.extra:
+        val = {"POINT": lambda a: interp(a, vidx, vw), "CORNER": lambda a: interp(a, cidx, cw),
+               "FACE": lambda a: a[face_src]}[dom](arr)
+        a = me.attributes.new(aname, dtype, dom)
+        if dtype == "BOOLEAN":
+            a.data.foreach_set(prop, (val > 0.5).ravel().tolist())
+        elif dtype in ("INT", "INT8"):
+            a.data.foreach_set(prop, np.rint(val).astype(np.int64).ravel().tolist())
+        else:
+            a.data.foreach_set(prop, val.ravel())
 
     # sharp edges, then corner normals (the normal spaces depend on the sharp edges)
     ev = np.empty(len(me.edges) * 2, np.int64)
@@ -494,12 +547,20 @@ def write_variant(src, tag, spec):
         D = np.where(D >= cut, D, 0.0)
     s = D.sum(1, keepdims=True)
     D = np.where(s > 0, D / np.maximum(s, 1e-12), D)
-    W[:, dc] = D
+    if limit_all:
+        W[:, dc] = D
+    else:
+        new = (vw > 0).sum(1) > 1  # copied vertices have one source with weight 1
+        W[np.ix_(new, dc)] = D[new]
     for gi, g in enumerate(o2.vertex_groups):
         col_w = W[:, gi]
         nz = np.nonzero(col_w > 1e-5)[0]
         for vi in nz:
             g.add([int(vi)], float(col_w[vi]), "REPLACE")
+    if not limit_all:  # copied vertices also keep their zero and near-zero memberships
+        for vi in np.nonzero((vw > 0).sum(1) == 1)[0]:
+            for gi, w in src.tiny_weights.get(int(vidx[vi, np.argmax(vw[vi])]), ()):
+                o2.vertex_groups[gi].add([int(vi)], w, "REPLACE")
 
     # shape keys
     if src.keys:
