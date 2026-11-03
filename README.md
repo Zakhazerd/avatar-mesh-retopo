@@ -4,7 +4,7 @@ A Claude skill for lowering the triangle count of VRChat/avatar meshes in Blende
 
 Claude works through a Blender MCP connection:
 - it asks which versions to build, up to six (loop levels LOD1/LOD2/LOD3, each with or without shape-key protection), and whether to build them in parallel with agents;
-- for garments it can also rebuild every piece as an even quad grid (experimental on bodies, where the loop levels do better);
+- for garments it can also rebuild every piece as an even quad grid (on a body only if you ask for it: the loop levels do better there, and its topology is messy);
 - it checks for over-dense areas and asks whether to do more there;
 - it proves the loop levels exact against the source, and checks the quad rebuild's interpolated data;
 - it leaves you on a side-by-side comparison in Blender.

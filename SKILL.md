@@ -56,10 +56,10 @@ Fill in `scripts/avatar_config.py` from that, and **confirm every value with the
 
        | Quad version | Tris | What it looked like |
        |---|---|---|
-       | one spacing per piece | 53,118 | clean quads on legs and arms; faceted breasts, a pinched cleft between the buttocks, lost creases |
-       | adaptive (finer where it curves, 2 mm deviation) | 59,425 | the shape holds, but 143 density patches and half the new faces are triangles |
+       | one spacing per piece (an earlier test build, not kept in the scripts) | 53,118 | clean quads on legs and arms; faceted breasts, a pinched cleft between the buttocks, lost creases |
+       | adaptive (finer where it curves, 2 mm deviation; `build_quad_region.py`) | 59,425 | the shape holds, but the topology is a patchwork: 143 density patches, and half the new faces are triangles |
 
-       LOD3 keys got 46,648 with exact data. Offer Quad for a body only if the user asks, show them these numbers, and treat it as experimental (4.7).
+       LOD3 keys got 46,648 with exact data. **For a body, leave Quad out of the menu.** Don't offer or suggest it. Build it only when the user already knows about it and asks for it by name; then show them these numbers and the topology before building (4.7).
 3. **Parallel processing?** Ask whether to build the versions in parallel, with agents each doing one version while you do one. Tell them the cost:
    - each agent used ~370k tokens and ~5 minutes in our run;
    - each runs its own background Blender (2–3 GB of RAM).
@@ -193,7 +193,7 @@ Every piece is flattened with a minimum-stretch unwrap on a temporary copy of th
 
 **Garments:** `build_variants.py` builds C (16 mm) and D (20 mm), with buttons rebuilt at 8 segments. Check the poke-through and the layered parts (collar, placket) in the sheets.
 
-**Body regions (experimental):** `build_quad_region.py`. It uses the region and keep masks of `build_region.py` and Reset Vectors as in 4.4.
+**Body regions (experimental, only on request):** `build_quad_region.py`. Never propose it: run it only when the user knows about it and asks for it by name (see section 1). It uses the region and keep masks of `build_region.py` and Reset Vectors as in 4.4.
 - **Spacing:** a deviation limit like the shape guard (`DEV`, a quad's centre at most that far off the surface) and a minimum number of edges around a curve (`N_MIN`).
 - **Read curvature at the scale of the spacing:** fit a quadric to the vertices within half a quad's diagonal. A per-edge curvature mostly reads mesh noise (it flagged a quarter of our chest as tighter than 25 mm), and a Laplacian measure reads a cylinder as twice its radius.
 - **Pieces that can't gain stay as they are:** an even grid can't be coarser than fingers or toes already are.
@@ -303,7 +303,7 @@ Tested on a friend's body sent as a bare mesh: no armature, no weights, no head,
 | `verify_region_variant.py` | Exactness check against the source, with the build's index map |
 | `retopo_lib.py` | Fingerprints, `ngon_review`, the garment source snapshot, flattening and barycentric locator, `write_variant`, button rebuild, intersection checks |
 | `variant_a_loops.py` / `variant_b_decimate.py` / `variant_c_pattern.py` / `build_variants.py` | Garment methods and their runner (the config's `GARMENT`); C and D are the full-quad rebuild |
-| `build_quad_region.py` / `verify_quad.py` | Experimental full-quad rebuild of a body region (live or background), and its check in background Blender: exact outside, weights, normals, mesh health against the source |
+| `build_quad_region.py` / `verify_quad.py` | Experimental full-quad rebuild of a body region (live or background; only when the user asks for it by name), and its check in background Blender: exact outside, weights, normals, mesh health against the source |
 | `render_views.py`, `poses.py`, `compose.py` | Background renders framed by bone roles, test poses (arms up, bent over, deep sit, fist), sheets from several render folders |
 | `metrics.py` | Distances with worst spots, shape-key and pose checks, poke-through per garment |
 | `setup_compare.py` | Comparison view layers + lineup in the live file, `add_rig()`, `show()` (the finishing view), `remove()` |

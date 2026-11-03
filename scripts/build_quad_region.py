@@ -1,6 +1,9 @@
 """Builds the full-quad level of a body region ("Quad") as a full duplicate of the body in the "<BODY> Retopo"
 collection. Live or background Blender. Everything avatar-specific comes from avatar_config.py.
 
+Experimental, and only on request: on an artist-made body it lost to the loop levels (59,425 tris against LOD3's
+46,648) with patchwork topology, half of the new faces triangles. Run it only when the user asks for it by name.
+
     exec(open(path, encoding="utf-8").read(), {"__name__": "build_quad_region", "DEV": 0.0015})
 
 The region and its keep masks are build_region.py's. The region is cut into islands at every border nothing may be
