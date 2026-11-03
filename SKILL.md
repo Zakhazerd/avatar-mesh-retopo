@@ -34,7 +34,7 @@ The scripts in `scripts/` are general. Everything avatar-specific is in **`scrip
 - colour channels that look like masks (mostly 0/1, a small share);
 - non-bone vertex groups and shape-key name prefixes.
 
-Fill in `scripts/avatar_config.py` from that, and **confirm every value with the user**: the body, the garments, the region's root bone, the feature masks, the hide-key prefix, the bone roles and the front. The guesses are only guesses.
+Fill in `scripts/avatar_config.py` from that, and **confirm every value with the user**: the body, the region's root bone, the feature masks, the hide-key prefix, the bone roles and the front. The guesses are only guesses. The garments are the exception: measure them instead (question 4 below).
 
 **Then ask these** before building anything (use AskUserQuestion if you have it):
 
@@ -64,7 +64,12 @@ Fill in `scripts/avatar_config.py` from that, and **confirm every value with the
    - each agent used ~370k tokens and ~5 minutes in our run;
    - each runs its own background Blender (2–3 GB of RAM).
    See section 5.
-4. **Clothing to guard against:** every garment that covers the region (`GARMENTS`).
+4. **Clothing to guard against: check it, don't ask.** Put every garment on the same rig in `GARMENTS`, then measure each one against the region before building.
+   - **How:** ray-cast from the region's vertices along their normals to the garment's rest shape, as `cover_guard` does. Report how much of the region it covers within the guard's 12 mm reach, and its smallest gap: "Socks: within 2 mm over the feet. Hoodie: never closer than 6 mm."
+   - **Why not ask:** a garment that never comes that close can't block a loop, so guarding against it costs time, not triangles.
+   - **Ask only about what the mesh can't show:**
+     - **Hidden or toggled garments and alternate outfits:** say you included them, and leave one out only if the user says it's never worn over this part.
+     - **Clothing that isn't in the file, or sits on another rig** (added in Unity, another avatar's outfit): you can't guard against what you can't see, so ask whether there is any.
 5. **Features to keep at full detail:** small sharp features such as nipples, areolae or lips (`KEEP_MASKS`). Ask whether a vertex-colour channel or vertex group already marks them (see 4.5 for why).
 6. **Shape guard:** keep loops whose removal would flatten the surface by more than 2 mm (the default). Ask only if they want it tighter or off.
 7. **Over-dense areas: do more there?** One rule everywhere doesn't notice parts that carry far more loops than their shape needs, so look before building:
