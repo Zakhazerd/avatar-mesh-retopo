@@ -1,0 +1,14 @@
+# no avatar files or renders in this repository
+*.blend
+*.blend1
+*.fbx
+*.obj
+*.png
+*.jpg
+*.jpeg
+*.exr
+*.hdr
+*.psd
+*.zip
+__pycache__/
+*.pyc
