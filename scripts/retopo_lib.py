@@ -75,11 +75,12 @@ def tri_count(obj):
 class Source:
     """Read-only arrays and topology of the source garment, taken from a private copy of its mesh.
 
-    seams="UVMap": pieces are split at UVMap seams (a Marvelous Designer garment). seams="all": also at seams of
+    seams="main": pieces are split at the seams of the first UV map (the texture map, Unity's UV0, whatever it's
+    called; a Marvelous Designer garment). A UV map's name instead picks that map. seams="all": also at seams of
     every other UV map, jumps in any corner colour or corner attribute, and material borders, so nothing is ever
     interpolated across a border (a body: second UV maps, nail and skin masks, a face material)."""
 
-    def __init__(self, obj, seams="UVMap"):
+    def __init__(self, obj, seams="main"):
         self.obj = obj
         self.seams = seams
         me = self.me = obj.data.copy()
@@ -119,6 +120,9 @@ class Source:
             self.uvs[u.name] = a.reshape(-1, 2)
         self.uv_names = [u.name for u in me.uv_layers]
         self.active_uv = me.uv_layers.active.name
+        # the texture UV map: the first one (Unity's UV0), whatever it's called ("UVMap", "map1", "UVChannel_1"),
+        # or the map named by seams
+        self.main_uv = seams if seams in self.uvs else (self.uv_names[0] if self.uv_names else None)
         self.colors = {}
         self.color_meta = []
         for c in me.color_attributes:
@@ -222,7 +226,7 @@ class Source:
             layers = (list(self.uvs.values()) + list(self.colors.values())
                       + [a for _, dom, _, _, a in self.extra if dom == "CORNER"])
         else:
-            layers = [self.uvs["UVMap"]]
+            layers = [self.uvs[self.main_uv]] if self.main_uv else []
         for v in e.verts:
             la, lb = self.face_loop_at(f1, v), self.face_loop_at(f2, v)
             for data in layers:

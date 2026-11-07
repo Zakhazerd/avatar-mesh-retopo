@@ -6,7 +6,7 @@ optionally `h` (target edge length in metres).
 1. Chains: open edges, T-junctions, UV seams and creases (sharp edges) are split into chains at corners
    and junctions, then resampled at even arc length. Chain samples lie on original edges, so pieces that
    share a seam share the same new vertices (no cracks) and creases (rolled hems) stay crisp.
-2. Each piece gets a square grid of points at spacing h, aligned with its UVMap grain, kept away from
+2. Each piece gets a square grid of points at spacing h, aligned with its texture UV map's grain, kept away from
    chains, and a constrained Delaunay triangulation of grid + chain samples. Triangles are then joined
    into quads where they make good ones.
 3. Every new vertex and corner is a barycentric point on an original triangle of the same piece, so
@@ -280,10 +280,10 @@ def pattern_spec(src, ns, h, extra_frozen=(), remesh=None, pieces=None):
                 cons += [(a, b) for a, b in zip(ids, ids[1:]) if a != b]
         n_chain_pts = len(pts)
 
-        # grid aligned with the UVMap grain
+        # grid aligned with the texture UV map's grain (the first UV map, whatever it's called)
         loops = np.nonzero(np.isin(src.loop_face, [f.index for f in main_faces if isl[f.index] == I and not is_frozen[f.index]]))[0]
         X = flat[loops] - flat[loops].mean(0)
-        Y = src.uvs["UVMap"][loops] - src.uvs["UVMap"][loops].mean(0)
+        Y = src.uvs[src.main_uv][loops] - src.uvs[src.main_uv][loops].mean(0)
         M = np.linalg.lstsq(X, Y, rcond=None)[0].T  # uv = M @ flat
         d = np.linalg.solve(M, np.array([1.0, 0.0]))
         ax = d / np.linalg.norm(d)
