@@ -8,7 +8,7 @@ description: Lower the triangle count of a VRChat/avatar mesh in Blender (throug
 A tested workflow for cutting triangles on skinned avatar meshes (clothing and bodies with hundreds of shape keys) so the result can ship to Unity/VRChat. It was worked out on one avatar:
 
 - **A Marvelous Designer shirt:** 22,246 → 9,595 tris by loop dissolve, or 9,862 as an even quad grid.
-- **A body with 564 shape keys, neck down:** 62,686 → 45,086 tris. Every kept vertex has exactly its original data.
+- **A body with 565 shape keys, neck down:** 63,258 → 49,304 tris (LOD3 with shape-key protection). Every kept vertex has exactly its original data.
 
 The scripts in `scripts/` are general. Everything avatar-specific is in **`scripts/avatar_config.py`**, which every script reads: object names, garments, the region, feature masks, hide keys, bone roles and facing direction, check textures. Set the `HERE` path at the top of the scripts that load the others (`build_region.py`, `density_report.py`, `build_variants.py`, `build_quad_region.py`, `verify_quad.py`, `setup_compare.py`; marked `<set me ...>`), and fill in the config before anything else (section 1).
 
@@ -41,13 +41,18 @@ Fill in `scripts/avatar_config.py` from that, and **confirm every value with the
 1. **Region:** which object and part (a garment, one leg, the body from the neck down). For the body this sets `REGION_MODE` / `REGION_ROOT_BONE` in the config.
 2. **Versions:** any of up to **six**. There are three levels of detail, each **with** or **without** shape-key protection. LOD0 is the original; LOD1–LOD3 are reduced versions to choose one from, not a runtime LOD group:
 
-   | Level | Loop rule | Faces | On our body (neck down) |
+   | Level | Loop rule | Faces | On our body (63,258 tris; reduced neck down) |
    |---|---|---|---|
-   | **LOD1** | closed rings, one pass | all quads | 56,090 tris (−11%), looks like the original, max loss 1.8 mm |
-   | **LOD2** | closed rings, two passes | all quads | 53,258 (−15%), max 1.8 mm at rest, 4.7 mm bent |
-   | **LOD3** | any clean loop, one pass | quads + clean pentagons + some triangles | 45,086 (−28%), max 4.7 mm, 8.5 mm in a deep sit |
+   | **LOD1** | closed rings, one pass | all quads | 57,382 tris (−9%), looks like the original; loss at rest max 1.8 mm |
+   | **LOD2** | closed rings, two passes | all quads | 54,550 (−14%), max 1.8 mm at rest |
+   | **LOD3** | any clean loop, two passes | quads + clean pentagons + some triangles | 48,130 (−24%), 99% within 1.6 mm, max 3.8 mm at rest |
 
-   - **With shape-key protection:** a loop is kept wherever removing it would change any shape key by more than 1 mm. It costs a little: LOD3 went from 45,086 to 46,648.
+   - **These numbers are from the fixed loop pick (2026-11-07):** loops are now picked face-disjoint (4.1 step 7).
+     - **Old pick:** one LOD3 pass reached 45,086–47,220, but only because crossing loops removed vertices no guard had checked. The worst loss was 4.7 mm despite the 2 mm shape limit, and extra passes tore the mesh.
+     - **Fixed pick, one pass:** 54,180, max 1.95 mm, about what LOD2 gives.
+     - **Why LOD3 now runs two passes:** the second pass takes the loops the first one had to leave.
+     - **A third pass** (`passes=3`) reached 45,666 with keys, with 99% within 1.7 mm but a worst spot of 4.6 mm, so look at it closely before offering it.
+   - **With shape-key protection:** a loop is kept wherever removing it would change any shape key by more than 1 mm. It costs a little: LOD3 went from 48,130 to 49,304 (max loss 2.3 mm).
    - **Without it:** the Basis is treated as the final shape. Keys still transfer exactly on every kept vertex, but they lose the detail of the removed loops. On our body, a garter-squeeze key lost up to 5–7 mm.
    - **Why rings reduce so little:** on a body, few closed rings stay unbroken inside the region (UV seams and protected edges cut most of the torso's), so LOD1/LOD2 mostly thin the arms, legs and fingers. On a tube-like part (one leg) LOD1/LOD2 work better.
    - **Plus a full-quad rebuild ("Quad", section 4.7):** every piece is rebuilt as an even quad grid in its own flattened space. Its data is interpolated from the original, not exact. Offer it by what's being reduced:
@@ -59,7 +64,7 @@ Fill in `scripts/avatar_config.py` from that, and **confirm every value with the
        | one spacing per piece (an earlier test build, not kept in the scripts) | 53,118 | clean quads on legs and arms; faceted breasts, a pinched cleft between the buttocks, lost creases |
        | adaptive (finer where it curves, 2 mm deviation; `build_quad_region.py`) | 59,423 | the shape holds, but the topology is a patchwork: 143 density patches, and half the new faces are triangles |
 
-       LOD3 keys got 46,648 with exact data. **For a body, leave Quad out of the menu.** Don't offer or suggest it. Build it only when the user already knows about it and asks for it by name; then show them these numbers and the topology before building (4.7).
+       LOD3 keys gets 49,304 with exact data. **For a body, leave Quad out of the menu.** Don't offer or suggest it. Build it only when the user already knows about it and asks for it by name; then show them these numbers and the topology before building (4.7).
 3. **Parallel processing?** Ask whether to build the versions in parallel, with agents each doing one version while you do one. Tell them the cost:
    - each agent used ~370k tokens and ~5 minutes in our run;
    - each runs its own background Blender (2–3 GB of RAM).
@@ -141,16 +146,26 @@ Every remaining vertex and corner is an original one, so positions, all shape ke
    - UV seams and splits in **every** UV map;
    - sharp edges and material borders;
    - colour borders in any colour layer (e.g. nail masks; `COLOR_BORDER_LAYERS` narrows it);
+   - jumps in **any other corner attribute** (float, vector, int), such as a garment's mapping to the body's UVs or a skin mask. On one stocking, 458 such edges would otherwise have gone, smearing the mapping across body UV seams;
+   - edges between faces **wound opposite ways** (layered garment parts, overlays);
    - non-manifold edges.
 5. **Find loops** through regular vertices (4 edges, 4 quads).
    - `ends="closed"` takes rings only (LOD1/LOD2).
    - `ends="any"` also takes open loops (LOD3).
    - `ends="v3"` takes only open loops ending at 3-edge poles: triangles instead of pentagons.
 6. **Run the guards** (4.2) and drop every loop one of them rejects.
-7. **Pick every other loop:** a greedy maximum independent set, longest first. Two loops are neighbours when one quad has an edge of each as opposite sides; never remove two neighbours.
-8. **Dissolve:** `dissolve_edges(use_verts=False)`, then dissolve the vertices left with 2 edges. Only dissolve those whose faces are **all** inside the region, so faces outside are never touched. Delete loose vertices.
-9. **LOD2:** run a second pass of steps 5–8.
-10. **Clean the n-gons** (4.3), **then** Reset Vectors (4.4). Do it in that order: re-splitting faces after the reset leaves stale normals. That happened once and was off by up to 33° with a 29° seam.
+7. **Pick every other loop:** a greedy maximum independent set, longest first. Two loops are neighbours when they **touch the same face**, and two neighbours are never removed together.
+   - **Why faces:** this covers parallel loops one quad apart, and also loops that cross or meet at a pole.
+   - **The old rule** only counted loops on opposite sides of a quad, so two crossing loops could both go. The crossing vertex then lost all four edges, and no guard had checked that. The result was holes, 20–37-sided faces on hands and feet, and skin through the stocking.
+8. **Dissolve:**
+   1. `dissolve_edges(use_verts=False)`.
+   2. Dissolve **the loops' own vertices** that are left with 2 edges. Only dissolve those whose faces are **all** inside the region, so faces outside are never touched.
+   3. Delete the loops' vertices left loose.
+   
+   Leave every other vertex alone. Vertices that already had 2 edges, like a hair strand's tip, stay; dissolving them cost up to 19 mm. Loose vertices that were already in the source stay too.
+9. **LOD2 and LOD3:** run a second pass of steps 5–8, with the original-surface guard (4.2).
+10. **Check the topology:** each pass reports `topology_changed`, a change in the counts of open, non-manifold or wire edges or of loose vertices. It should stay empty; if it isn't, find the loop that did it before you show anything.
+11. **Clean the n-gons** (4.3), **then** Reset Vectors (4.4). Do it in that order: re-splitting faces after the reset leaves stale normals. That happened once and was off by up to 33° with a 29° seam.
 
 ### 4.2 Guards (a loop is kept when removing it would…)
 - **Clothing:** …poke the skin through a garment. At each loop vertex:
@@ -160,15 +175,22 @@ Every remaining vertex and corner is an original one, so positions, all shape ke
   4. reject the loop if the rise is more than the gap minus 0.8 mm.
   
   Guard against every garment over the region. On our body only the stocking and bra ever blocked loops (~180 loops).
+- **What's under a garment** (`cover_guard(obj, side="under")`, the config's `UNDER`): when the mesh being reduced is itself a garment, …let it sink into the body or the garment under it. This is the same test, ray-cast inward.
 - **Shape keys** (`key_guard`, when the user wants protection): …change a key's offset by more than 1 mm compared with the offset interpolated between the vertex's neighbours across the loop.
   - Leave out the hide keys (`HIDE_KEY_PREFIXES`).
   - It reads the offsets by original index, so it needs the `retopo_orig` attribute.
 - **Shape** (`shape_guard`, 2 mm): …move a vertex more than 2 mm from the straight line between its neighbours across the loop. Without it, LOD3 lost 9–11 mm on the calves; with it, at most 4.7 mm.
+- **Original surface** (`orig_guard`, the shape limit, added by `build_region.py` whenever a level has more than one pass or extra passes): …leave the merged face more than the limit from any **original** vertex under it, with either triangulation.
+  - **Why:** the shape guard only sees the current mesh, so losses add up over passes. One stocking vertex lost 3.8 mm over four 1.5 mm passes.
+  - **How:** each pass, every original vertex is given to the nearest current face, and a loop edge's two faces are checked as the one face they merge into.
+  - **Limits:** it's an approximation, because the faces a whole loop leaves can triangulate differently from each edge's quad. On our body, two LOD3 passes kept 99% within 1.6 mm, with a few spots up to 2.3 mm with keys and 3.8 mm without. Measure the result (section 6); don't take the limit as a promise.
+- **Every guard checks every vertex a loop removes,** loop ends included. That only holds because loops are picked face-disjoint (4.1 step 7): with crossing loops, a vertex can vanish in a way no single loop's check saw.
 
 ### 4.3 N-gons
 - **Where they come from:** an open loop leaves a 5-sided face at each end, or a triangle where it ends at a 3-edge pole. Loop ends that bunch up merge into 6- to 27-sided faces.
 - **Review them** with `ngon_review()`: count by number of sides, and flag faces with 7+ sides, bent ones, concave ones and slivers. Compare with the source's own n-gons.
 - **Re-split** every face with 6+ sides or a bad shape: triangulate it (beauty), then join the triangles back into quads where they make good ones (`fix_ngons`). After that, run a join pass on the region's triangles. Nothing moves and the triangle count stays the same.
+  - **Skip a face whose cut already exists as an edge elsewhere.** On a fold or a thin strip (hair, a bra hook), two corners that aren't neighbours around the face can already share an edge. Triangulating or splitting along it reuses that edge and gives it a third face. `fix_ngons` and `pair_pentagons` both skip those.
 - **Pentagon pairing** (`pair_pentagons`, built into `build_region.py`, same vertices and triangle count):
   - a pentagon + a neighbouring triangle (6 corners) becomes 2 quads;
   - two neighbouring pentagons (8 corners) become 3 quads;
@@ -178,7 +200,13 @@ Every remaining vertex and corner is an original one, so positions, all shape ke
 - **Tell the user** that a pentagon costs the same 3 triangles in Unity. Pentagons only matter for editing and smooth deformation in Blender.
 
 ### 4.4 Normals: Reset Vectors on the region
-- **Region corners:** `normals_split_custom_set` with zero vectors (the same as Mesh > Normals > Reset Vectors).
+- **Region corners:** zero vectors through `set_custom_normals` (`leg_loops.py`), which gives the same result as Mesh > Normals > Reset Vectors.
+  - **Blender 5.2 pitfall:** `normals_split_custom_set` with a zero vector only means "auto" on a mesh that has **no** custom normals yet. On a mesh that already has them, the corner keeps its old custom normal: on 5.2.3, a test sphere tilted 98° stayed 98° off.
+  - **The fix:** `set_custom_normals` removes the `custom_normal` attribute first, then sets the list.
+  - **What went wrong before the fix:** the reset silently did nothing, so region corners kept their old custom normals. Blender stores those as offsets from the automatic normal, so how much that mattered depends on the mesh:
+    - **Region normals already automatic:** often true of a body neck down. The offsets are about 0 and follow the new faces, so the result looks like a reset. Ours matched a true reset within 0.04° either way.
+    - **Region with real custom normals:** for example a Marvelous Designer shirt, whose normals sat 13° off automatic at the 95th percentile. The old offsets carry over onto much bigger faces. Check this with `auto_corner_normals` before trusting the source's normals in a region.
+  - **Side effect:** `normals_split_custom_set` also marks edges sharp where it has to split a fan, and auto normals respect sharp edges.
 - **Outside corners keep their original normal.** Map them by (original vertex, sorted original vertices of its face); a face or neck usually has deliberate custom normals.
 - **Border ring:** region corners on the border's vertices take the outside corners' normal. Otherwise the new auto normals there leave a seam (7° on our neck). Check the seam: the largest angle between region and outside corners at the same vertex. Ours was 0.04°, the same as the original.
 
@@ -234,7 +262,9 @@ Every piece is flattened with a minimum-stretch unwrap on a temporary copy of th
   - the border seam angle;
   - outside corners against the original.
   
-  Compare against a **true reset**: a copy of the version's mesh with `normals_split_custom_set(zeros)`. Rebuilding the mesh with `from_pydata` gave a wrong reference on one body (33° off where the real reset matched within 0.05°).
+  Compare against a **true reset**: `auto_corner_normals(me)` (`leg_loops.py`), a copy of the version's mesh with its `custom_normal` attribute removed.
+  - **Don't** use a copy with `normals_split_custom_set(zeros)`: in Blender 5.2 that changes nothing (4.4), so the check always passes. One build reported "within 0.04° of a true reset" while its reset had done nothing.
+  - **Don't** rebuild the mesh with `from_pydata` either: that gave a wrong reference on one body, 33° off where the real reset matched within 0.05°.
 - **Metrics in background Blender** (`metrics.py`): distance in both directions, with the worst spots, at rest, with relevant keys at 1, and in poses (`poses.py`: arms up, bent over, deep sit, fist).
   - Poke-through is counted per garment (a list of covers), sampling face centres and edge midpoints too.
   - Start keys from the file's own values.
@@ -305,7 +335,7 @@ Tested on a friend's body sent as a bare mesh: no armature, no weights, no head,
 | `inspect_avatar.py` | Read-only scene report with candidates for the config |
 | `density_report.py` | Read-only report of over-dense areas (extra-pass candidates, dense-but-curved, very dense kept parts) with their area specs |
 | `build_region.py` | Builds the chosen levels of the body region: keep masks, guards, extra passes in chosen areas, n-gon cleanup, pentagon pairing, border-ring normals; leaves an index map for the checks |
-| `leg_loops.py` | Method A building blocks: triangle join, protected edges, loop finder (closed/v3/any), greedy pick, dissolve; guards (`cover_guard`, `key_guard`, `shape_guard`); `fix_ngons`, `pair_pentagons`, regional Reset Vectors |
+| `leg_loops.py` | Method A building blocks: triangle join, protected edges, loop finder (closed/v3/any), face-disjoint greedy pick, dissolve with a topology check; guards (`cover_guard` over/under, `key_guard`, `shape_guard`, `orig_guard`); `fix_ngons`, `pair_pentagons`; `set_custom_normals` (Reset Vectors that works in Blender 5.2) and `auto_corner_normals` (the reference for checks) |
 | `verify_region_variant.py` | Exactness check against the source, with the build's index map |
 | `retopo_lib.py` | Fingerprints, `ngon_review`, the garment source snapshot, flattening and barycentric locator, `write_variant`, button rebuild, intersection checks |
 | `variant_a_loops.py` / `variant_b_decimate.py` / `variant_c_pattern.py` / `build_variants.py` | Garment methods and their runner (the config's `GARMENT`); C and D are the full-quad rebuild |

@@ -7,15 +7,27 @@ the kept vertices stay exactly as they were.
 
 ends="closed" (default) dissolves closed loops (rings) only: that's the one case where every merged face stays
 a quad. An open loop ending at a 3-edge pole turns one neighbouring quad into a triangle ("v3"), and one
-ending anywhere else leaves a 5-sided face ("any"). Never dissolved: edges leaving the region, UV seams or UV-map splits (both maps),
-sharp edges, material borders, colour borders (a channel jump > 0.1 in any colour layer, like nail masks),
-non-manifold edges.
+ending anywhere else leaves a 5-sided face ("any"). Never dissolved: edges leaving the region, UV seams or UV-map
+splits (every map), sharp edges, material borders, colour borders (a channel jump > 0.1 in any colour layer, like
+nail masks), jumps in any other corner attribute (float, vector, int: a garment's "body UV" or a skin mask),
+edges between faces wound opposite ways, non-manifold edges.
+
+Loops are picked face-disjoint (no two dissolved loops touch the same face), so every vertex a loop removes is
+removed by that loop alone and its guards checked it against neighbours that stay. Only the loops' own vertices
+are dissolved afterwards: vertices that already had 2 edges (a hair strand's tip) and loose vertices stay.
 """
 import bmesh
 import bpy
 import numpy as np
 
 COLOR_JUMP = 0.1
+ATTR_JUMP = 1e-6
+
+
+def _attr_layers(bm):
+    """Corner layers that aren't UVs or colours (float, vector, int), without internal and retopo_* ones."""
+    return [(k, lay) for k in ("float", "float_vector", "int")
+            for name, lay in getattr(bm.loops.layers, k).items() if not name.startswith((".", "retopo"))]
 
 
 def _protected_edges(bm, region, color_layers=None):
@@ -23,6 +35,7 @@ def _protected_edges(bm, region, color_layers=None):
     uv_layers = list(bm.loops.layers.uv.values())
     cols = [lay for coll in (bm.loops.layers.color, bm.loops.layers.float_color) for name, lay in coll.items()
             if not name.startswith(".") and (color_layers is None or name in color_layers)]
+    attrs = _attr_layers(bm)
     seam_flag = bm.edges.layers.bool.get("uv_seam") if hasattr(bm.edges.layers, "bool") else None
     prot = set()
     for e in bm.edges:
@@ -37,11 +50,16 @@ def _protected_edges(bm, region, color_layers=None):
         if f1.material_index != f2.material_index:
             prot.add(e.index)
             continue
+        if e.link_loops[0].vert is e.link_loops[1].vert:  # the two faces wind opposite ways (layered parts)
+            prot.add(e.index)
+            continue
         for v in e.verts:
             l1 = next(l for l in f1.loops if l.vert == v)
             l2 = next(l for l in f2.loops if l.vert == v)
             if any((l1[u].uv - l2[u].uv).length > 1e-6 for u in uv_layers) or \
-                    any(max(abs(a - b) for a, b in zip(l1[c], l2[c])) > COLOR_JUMP for c in cols):
+                    any(max(abs(a - b) for a, b in zip(l1[c], l2[c])) > COLOR_JUMP for c in cols) or \
+                    any((max(abs(a - b) for a, b in zip(l1[lay], l2[lay])) if k == "float_vector"
+                         else abs(l1[lay] - l2[lay])) > ATTR_JUMP for k, lay in attrs):
                 prot.add(e.index)
                 break
     return prot
@@ -100,23 +118,19 @@ def _clean_loops(bm, region, prot, ends="closed"):
 
 
 def _pick_alternate(loops, greedy=True):
-    """Every other loop: two loops are neighbours when a quad has one edge in each as opposite sides.
+    """Every other loop: two loops are neighbours when they touch the same face. That covers parallel loops one
+    quad apart, and also loops that cross or meet at a pole: removing two of those together removes vertices no
+    guard checked (a crossing vertex loses all four edges) and leaves holes and 20-37-sided faces.
     2-colour the neighbour graph breadth-first; dissolve one colour, never two neighbours."""
-    owner = {}
-    for i, es in enumerate(loops):
-        for e in es:
-            owner[e.index] = i
-    nbr = [set() for _ in loops]
+    by_face = {}
     for i, es in enumerate(loops):
         for e in es:
             for f in e.link_faces:
-                if len(f.verts) != 4:
-                    continue
-                ls = list(f.loops)
-                k = next(j for j, l in enumerate(ls) if l.edge == e)
-                o = ls[(k + 2) % 4].edge.index
-                if o in owner and owner[o] != i:
-                    nbr[i].add(owner[o])
+                by_face.setdefault(f.index, set()).add(i)
+    nbr = [set() for _ in loops]
+    for owners in by_face.values():
+        for i in owners:
+            nbr[i] |= owners - {i}
     if greedy:
         chosen, blocked = [], set()
         for i in sorted(range(len(loops)), key=lambda i: -len(loops[i])):
@@ -140,11 +154,28 @@ def _pick_alternate(loops, greedy=True):
     return pick
 
 
+def _topology(bm):
+    """Open edges, edges with 3+ faces, wire edges and loose vertices: a pass must leave these counts as they were
+    (reduce_region reports any change per pass as "topology_changed")."""
+    out = {"open": 0, "nonmanifold": 0, "wire": 0}
+    for e in bm.edges:
+        k = len(e.link_faces)
+        if k == 0:
+            out["wire"] += 1
+        elif k == 1:
+            out["open"] += 1
+        elif k > 2:
+            out["nonmanifold"] += 1
+    out["loose_verts"] = sum(1 for v in bm.verts if not v.link_edges)
+    return out
+
+
 def reduce_region(obj, region_verts, passes=1, join=True, join_shape=40.0, write=True, greedy=True, ends="closed", guard=None,
                   color_layers=None):
     """region_verts: bool array over the mesh's vertices. With write=False nothing is written back (a dry run).
     guard: a loop filter or a list of them (a loop is dissolved only if all keep it); a filter with a .bind(bm)
-    gets the bmesh before each pass. color_layers: see _protected_edges. Returns counts."""
+    gets the bmesh before each pass. color_layers: see _protected_edges. Returns counts; a pass's
+    "topology_changed" should be empty."""
     import math
     me = obj.data
     bm = bmesh.new()
@@ -155,6 +186,7 @@ def reduce_region(obj, region_verts, passes=1, join=True, join_shape=40.0, write
     info = {"passes": []}
 
     def region_faces():
+        bm.faces.index_update()  # bmesh ops leave element indices stale
         bm.faces.ensure_lookup_table()
         return {f.index for f in bm.faces if all(v[inr] for v in f.verts)}
 
@@ -170,6 +202,8 @@ def reduce_region(obj, region_verts, passes=1, join=True, join_shape=40.0, write
         region = region_faces()
         info["after_join_tri_faces"] = sum(1 for i in region if len(bm.faces[i].verts) == 3)
     for _ in range(passes):
+        bm.verts.index_update()
+        bm.edges.index_update()
         bm.edges.ensure_lookup_table()
         bm.normal_update()
         prot = _protected_edges(bm, region, color_layers)
@@ -190,17 +224,22 @@ def reduce_region(obj, region_verts, passes=1, join=True, join_shape=40.0, write
             loops = kept
         pick = _pick_alternate(loops, greedy)
         rem = [e for i in pick for e in loops[i]]
+        topo0 = _topology(bm)
+        cand = {v for e in rem for v in e.verts}  # only the loops' own vertices may go
         bmesh.ops.dissolve_edges(bm, edges=rem, use_verts=False, use_face_split=False)
-        two = [v for v in bm.verts if v[inr] and len(v.link_edges) == 2 and len(v.link_faces) == 2
+        two = [v for v in cand if v.is_valid and v[inr] and len(v.link_edges) == 2 and len(v.link_faces) == 2
                and all(all(x[inr] for x in f.verts) for f in v.link_faces)]  # never touch faces outside the region
         bmesh.ops.dissolve_verts(bm, verts=two, use_face_split=False, use_boundary_tear=False)
-        loose = [v for v in bm.verts if not v.link_edges]
+        loose = [v for v in cand if v.is_valid and not v.link_edges]
         bmesh.ops.delete(bm, geom=loose, context="VERTS")
         region = region_faces()
+        topo1 = _topology(bm)
         info["passes"].append({"clean_loops": len(loops), "dissolved_loops": len(pick), "edges": len(rem),
                                "faces": len(region), "tris": sum(len(bm.faces[i].verts) - 2 for i in region),
                                "ngons": sum(1 for i in region if len(bm.faces[i].verts) > 4),
-                               "tri_faces": sum(1 for i in region if len(bm.faces[i].verts) == 3)})
+                               "max_sides": max((len(bm.faces[i].verts) for i in region), default=0),
+                               "tri_faces": sum(1 for i in region if len(bm.faces[i].verts) == 3),
+                               "topology_changed": {k: topo1[k] - topo0[k] for k in topo0 if topo1[k] != topo0[k]}})
     bm.verts.layers.int.remove(inr)
     if write:
         bm.to_mesh(me)
@@ -209,20 +248,48 @@ def reduce_region(obj, region_verts, passes=1, join=True, join_shape=40.0, write
     return info
 
 
+def set_custom_normals(me, normals):
+    """normals_split_custom_set where a zero vector really means "auto" (Reset Vectors). In Blender 5.2 a zero
+    vector leaves the corner's existing custom normal as it was when the mesh already has custom normals (tested
+    on 5.2.3: a mesh tilted 98 degrees stayed 98 degrees off); on a mesh without them it means auto. So the old
+    custom normals are cleared first. Note that normals_split_custom_set also marks edges sharp where it has to
+    split a fan, and auto normals respect sharp edges."""
+    cn = me.attributes.get("custom_normal")
+    if cn is not None:
+        me.attributes.remove(cn)
+    me.normals_split_custom_set([tuple(x) for x in normals])
+
+
+def auto_corner_normals(me):
+    """The corner normals a true Reset Vectors would give on me (a copy with its custom normals cleared), for
+    checks. Don't build the reference with normals_split_custom_set(zeros) on a copy: in Blender 5.2 that changes
+    nothing, so a check against it always passes."""
+    ref = me.copy()
+    cn = ref.attributes.get("custom_normal")
+    if cn is not None:
+        ref.attributes.remove(cn)
+    out = np.empty(len(ref.loops) * 3)
+    ref.corner_normals.foreach_get("vector", out)
+    bpy.data.meshes.remove(ref)
+    return out.reshape(-1, 3)
+
+
 def reset_vectors(me, loop_mask):
     """Reset Vectors (custom normals back to auto) on the corners in loop_mask; other corners keep theirs."""
     cur = np.empty(len(me.loops) * 3)
     me.corner_normals.foreach_get("vector", cur)
     cur = cur.reshape(-1, 3)
     cur[loop_mask] = 0.0
-    me.normals_split_custom_set([tuple(x) for x in cur])
+    set_custom_normals(me, cur)
 
 
-def cover_guard(cover_obj, margin=0.0008, reach=0.012):
+def cover_guard(cover_obj, margin=0.0008, reach=0.012, side="over"):
     """A loop filter: rejects a loop if, at any of its vertices, the surface left after dissolving it (the
     midpoint of the vertex's two neighbours across the loop) would rise more than (gap to cover - margin)
     above the vertex, i.e. poke through cover_obj (a stocking). Uses the cover's rest shape (mesh plus its
-    active shape keys, no Armature), in the same space as the body (both objects sit at the origin)."""
+    active shape keys, no Armature), in the same space as the body (both objects sit at the origin).
+    side="under": cover_obj lies under the reduced mesh instead (the body under a garment being reduced), and the
+    loop is rejected if the surface would sink into it."""
     from mathutils import Vector
     from mathutils.bvhtree import BVHTree
     cm = cover_obj.data
@@ -240,6 +307,7 @@ def cover_guard(cover_obj, margin=0.0008, reach=0.012):
                 co += k.value * (a - r).reshape(-1, 3)
     mw = cover_obj.matrix_world
     tree = BVHTree.FromPolygons([mw @ Vector(c) for c in co], [tuple(p.vertices) for p in cm.polygons])
+    sign = -1.0 if side == "under" else 1.0
 
     def ok(edges):
         es = {e.index for e in edges}
@@ -247,7 +315,7 @@ def cover_guard(cover_obj, margin=0.0008, reach=0.012):
             cross = [e.other_vert(v) for e in v.link_edges if e.index not in es]
             if len(cross) != 2:
                 continue
-            n = v.normal
+            n = v.normal * sign
             rise = ((cross[0].co + cross[1].co) / 2 - v.co).dot(n)
             if rise <= 0:
                 continue
@@ -255,7 +323,76 @@ def cover_guard(cover_obj, margin=0.0008, reach=0.012):
             if hit[0] is not None and rise > hit[3] - margin:
                 return False
         return True
-    ok.label = "cover " + cover_obj.name
+    ok.label = ("under " if side == "under" else "cover ") + cover_obj.name
+    return ok
+
+
+def _merged_corners(e):
+    """For a loop edge e = (v, w): the corners of its two faces next to v and w that are not on e."""
+    v, w = e.verts
+    out = []
+    for f in e.link_faces:
+        ls = list(f.loops)
+        cv = next((l.link_loop_prev.vert if l.link_loop_next.vert is w else l.link_loop_next.vert) for l in ls if l.vert is v)
+        cw = next((l.link_loop_prev.vert if l.link_loop_next.vert is v else l.link_loop_next.vert) for l in ls if l.vert is w)
+        out.append((cv.co, cw.co))
+    return out
+
+
+def _merged_gap(pt, nrm, a1, a2, b2, b1, diag):
+    """Signed height (along nrm) of the merged face (a1, a2, b2, b1) over pt, triangulated along a1-b2 (diag 0)
+    or a2-b1 (diag 1): the nearer of its two triangles."""
+    from mathutils.geometry import closest_point_on_tri
+    t = ((a1, a2, b2), (a1, b2, b1)) if diag == 0 else ((a1, a2, b1), (a2, b2, b1))
+    q1 = closest_point_on_tri(pt, *t[0])
+    q2 = closest_point_on_tri(pt, *t[1])
+    q = q1 if (q1 - pt).length <= (q2 - pt).length else q2
+    return (q - pt).dot(nrm)
+
+
+def orig_guard(obj, limit=0.002):
+    """A loop filter measured against the ORIGINAL surface, so losses don't add up over passes (LOD2, extra
+    passes): a pass's shape guard only sees the current mesh, and one stocking vertex lost 3.8 mm over four 1.5 mm
+    passes. Make it from the unreduced duplicate (its vertex positions are the original surface). Each pass,
+    every original vertex is given to the current face nearest to it; a loop is rejected if the face its edge's two
+    faces merge into (either triangulation) would lie more than limit from one of those vertices, along the faces'
+    normal."""
+    from mathutils import Vector
+    from mathutils.bvhtree import BVHTree
+    me = obj.data
+    co = np.empty(len(me.vertices) * 3)
+    me.vertices.foreach_get("co", co)
+    pts = [Vector(p) for p in co.reshape(-1, 3)]
+    state = {}
+
+    def bind(bm):
+        bm.faces.ensure_lookup_table()
+        tree = BVHTree.FromBMesh(bm)
+        under = {}
+        for k, pt in enumerate(pts):
+            loc, nrm, fi, dist = tree.find_nearest(pt, 0.02)
+            if loc is not None:
+                under.setdefault(fi, []).append(k)
+        state["under"] = under
+
+    def ok(edges):
+        under = state["under"]
+        for e in edges:
+            f1, f2 = e.link_faces
+            ks = under.get(f1.index, []) + under.get(f2.index, [])
+            if not ks:
+                continue
+            (a1, b1), (a2, b2) = _merged_corners(e)
+            nrm = f1.normal + f2.normal
+            if nrm.length < 1e-9:
+                continue
+            nrm.normalize()
+            for k in ks:
+                if max(abs(_merged_gap(pts[k], nrm, a1, a2, b2, b1, d)) for d in (0, 1)) > limit:
+                    return False
+        return True
+    ok.bind = bind
+    ok.label = "original surface"
     return ok
 
 
@@ -338,7 +475,7 @@ def key_guard(obj, names, tol=0.001):
 def _corner_values(bm):
     """A function giving a loop's UVs, colours and other corner data (not the custom normal) as a tuple."""
     lays = [(k, lay) for k in ("uv", "color", "float_color", "float", "int", "float_vector")
-            for name, lay in getattr(bm.loops.layers, k).items() if not name.startswith(".")]
+            for name, lay in getattr(bm.loops.layers, k).items() if not name.startswith((".", "retopo"))]
 
     def values(lp):
         out = []
@@ -370,6 +507,29 @@ def _splits(m):
         out = [[(i, i + 1, i + 2, i + 3), (i + 4, i + 5, i + 6, i + 7), (i, i + 3, i + 4, i + 7)] for i in range(4)]
         out += [[(i, i + 1, i + 2, i + 3), (i, i + 3, i + 4, i + 5), (i, i + 5, i + 6, i + 7)] for i in range(8)]
     return [[tuple(x % m for x in q) for q in s] for s in out]
+
+
+def _joined(a, b):
+    return any(e.other_vert(a) is b for e in a.link_edges)
+
+
+def _cut_exists(verts, split):
+    """True if one of the split's cuts joins two corners that already share an edge elsewhere."""
+    m = len(verts)
+    for q in split:
+        for k in range(4):
+            i, j = q[k], q[(k + 1) % 4]
+            if (j - i) % m not in (1, m - 1) and _joined(verts[i], verts[j]):
+                return True
+    return False
+
+
+def _chord_exists(f):
+    """True if two corners of f that aren't neighbours around it already share an edge (a fold or a thin strip):
+    triangulating f could then reuse that edge and give it a third face."""
+    vs = list(f.verts)
+    n = len(vs)
+    return any(_joined(vs[i], vs[j]) for i in range(n) for j in range(i + 2, n) if not (i == 0 and j == n - 1))
 
 
 def pair_pentagons(bm, in_region, max_dev=55.0, passes=3):
@@ -410,6 +570,8 @@ def pair_pentagons(bm, in_region, max_dev=55.0, passes=3):
             n = (p.normal + x.normal).normalized()
             best = None
             for s in _splits(len(verts)):
+                if _cut_exists(verts, s):
+                    continue  # face_split would reuse that edge and give it a third face
                 devs = [_quad_dev([verts[i].co for i in q], n) for q in s]
                 if None in devs:
                     continue
@@ -445,11 +607,12 @@ def pair_pentagons(bm, in_region, max_dev=55.0, passes=3):
 
 def fix_ngons(bm, faces, join_angle=60.0):
     """Re-splits n-gons without moving anything: each face is triangulated (beauty) and its triangles joined
-    back into quads where they make good ones. Same vertices, same triangle count, corners keep their data."""
+    back into quads where they make good ones. Same vertices, same triangle count, corners keep their data.
+    Faces with a chord that already exists as an edge are left as they are (see _chord_exists)."""
     import math
     made = []
     for f in faces:
-        if not f.is_valid:
+        if not f.is_valid or _chord_exists(f):
             continue
         tris = bmesh.ops.triangulate(bm, faces=[f], quad_method="BEAUTY", ngon_method="BEAUTY")["faces"]
         out = bmesh.ops.join_triangles(bm, faces=tris, cmp_seam=True, cmp_sharp=True, cmp_uvs=True, cmp_vcols=True,

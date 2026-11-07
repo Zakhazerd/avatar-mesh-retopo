@@ -11,11 +11,15 @@ A level's "extra" (or EXTRA in the exec namespace, for every level built) lists 
 over-dense areas after the main pass, with the same loop rule and guards (areas: see area_mask).
 
 Region: by bone weight, by material or the whole mesh (see REGION_MODE in the config), minus the KEEP_MASKS,
-which stay at full detail. Loop rules as in leg_loops.py: LOD3 dissolves any clean loop once, LOD1 closed rings once, LOD2 closed rings
-twice (all quads). A loop is kept when removing it would
-  - let the skin poke through one of the GARMENTS (0.8 mm margin, their rest shapes);
+which stay at full detail. Loop rules as in leg_loops.py: LOD1 dissolves closed rings once, LOD2 closed rings twice
+(all quads), LOD3 any clean loop twice. Loops are picked face-disjoint, so one pass takes about half of what a
+crossing pick took; LOD3's second pass takes the loops the first had to leave. A loop is kept when removing it would
+  - let the skin poke through one of the GARMENTS (0.8 mm margin, their rest shapes), or sink into one of the
+    config's UNDER objects (when the source is itself a garment);
   - change a shape key by more than 1 mm ("keys" levels; the HIDE_KEY_PREFIXES keys are not guarded);
-  - flatten the surface by more than the level's shape limit (2 mm).
+  - flatten the surface by more than the level's shape limit (2 mm); with more than one pass (LOD2, LOD3, extras)
+    also measured against the original surface, so the passes don't add up (mostly: measure the result).
+Each pass reports "topology_changed" (open, non-manifold or wire edges, loose vertices); it should stay empty.
 Then n-gons in the region with 6+ sides or a bad shape are re-split (beauty triangulate + join, nothing moves),
 pentagons are paired with neighbouring triangles/pentagons into quads where that makes good quads, and Reset
 Vectors runs on the region's corners. Region corners on the border ring take the outside corners' normal (no
@@ -37,10 +41,10 @@ COLLECTION = f"{SOURCE} Retopo"
 DEFAULT_LEVELS = {
     "LOD1": dict(shape=0.002, keys=False, ends="closed", passes=1),
     "LOD2": dict(shape=0.002, keys=False, ends="closed", passes=2),
-    "LOD3": dict(shape=0.002, keys=False, ends="any", passes=1),
+    "LOD3": dict(shape=0.002, keys=False, ends="any", passes=2),
     "LOD1 keys": dict(shape=0.002, keys=True, ends="closed", passes=1),
     "LOD2 keys": dict(shape=0.002, keys=True, ends="closed", passes=2),
-    "LOD3 keys": dict(shape=0.002, keys=True, ends="any", passes=1),
+    "LOD3 keys": dict(shape=0.002, keys=True, ends="any", passes=2),
 }
 LEVELS = globals().get("LEVELS") or DEFAULT_LEVELS
 LEVELS = {k: v for k, v in LEVELS.items() if k in globals().get("ONLY", ())}
@@ -214,7 +218,8 @@ if LEVELS:  # exec'd without ONLY (e.g. by density_report.py), it only defines t
         kept_verts += int(keep.sum())
         mask0 &= ~keep
     KEYS = region_keys(src, mask0)
-    covers = [bpy.data.objects[c] for c in CFG["GARMENTS"] if c in bpy.data.objects]
+    covers = [bpy.data.objects[c] for c in CFG["GARMENTS"] if c in bpy.data.objects and c != SOURCE]
+    unders = [bpy.data.objects[c] for c in CFG.get("UNDER", []) if c in bpy.data.objects and c != SOURCE]
     report = {"region_verts": int(mask0.sum()), "kept_by_masks": kept_verts, "keys_guarded": len(KEYS)}
     for tag, kw in LEVELS.items():
         name = f"{SOURCE} Retopo {CFG['REGION_NAME']} {tag}"
@@ -241,16 +246,21 @@ if LEVELS:  # exec'd without ONLY (e.g. by density_report.py), it only defines t
         for m in [m for m in o.modifiers if m.type == "MULTIRES"]:
             with bpy.context.temp_override(object=o, active_object=o, selected_objects=[o]):
                 bpy.ops.object.multires_higher_levels_delete(modifier=m.name)
-        guards = [lib["cover_guard"](c) for c in covers]
+        guards = [lib["cover_guard"](c) for c in covers] + [lib["cover_guard"](c, side="under") for c in unders]
         if kw["keys"]:
             guards.append(lib["key_guard"](o, KEYS, KEY_TOL))
         if kw["shape"]:
             guards.append(lib["shape_guard"](kw["shape"]))
+        extras = (list(kw.get("extra", [])) + list(globals().get("EXTRA", []))) if not DRY else []
+        if kw["shape"] and (kw["passes"] > 1 or extras):
+            # more than one pass: measure the loss against the original surface too, so passes don't add up
+            guards.append(lib["orig_guard"](o, kw["shape"]))
         info = lib["reduce_region"](o, mask0, passes=kw["passes"], join=True, ends=kw["ends"], guard=guards,
                                     write=not DRY, color_layers=CFG["COLOR_BORDER_LAYERS"])
-        row = {"guard_blocked": info.get("guard_blocked"), "region": info["passes"][-1], "region_before": info["before"]}
+        row = {"guard_blocked": info.get("guard_blocked"), "region": info["passes"][-1], "region_before": info["before"],
+               "topology_changed": [p["topology_changed"] for p in info["passes"] if p["topology_changed"]]}
         # extra passes in over-dense areas (density_report.py finds them): the same loop rule and guards
-        for spec, n_passes in (list(kw.get("extra", [])) + list(globals().get("EXTRA", []))) if not DRY else []:
+        for spec, n_passes in extras:
             oi_now = np.empty(len(me.vertices), np.int64)
             me.attributes["retopo_orig"].data.foreach_get("value", oi_now)
             area = (area_mask(src, spec) & mask0)[oi_now]
@@ -258,6 +268,7 @@ if LEVELS:  # exec'd without ONLY (e.g. by density_report.py), it only defines t
                                          color_layers=CFG["COLOR_BORDER_LAYERS"])
             row.setdefault("extra", []).append({"area": spec, "passes": n_passes, "before": einfo["before"],
                                                 "after": einfo["passes"][-1], "blocked": einfo.get("guard_blocked")})
+            row["topology_changed"] += [p["topology_changed"] for p in einfo["passes"] if p["topology_changed"]]
         if not DRY:
             row["ngons"] = clean_ngons(me, mask0)
             # Reset Vectors on the region; every other corner gets its original normal back. Region corners on the
@@ -286,7 +297,7 @@ if LEVELS:  # exec'd without ONLY (e.g. by density_report.py), it only defines t
                     else:
                         normals.append((0.0, 0.0, 0.0))
                         reset += 1
-            me.normals_split_custom_set(normals)
+            lib["set_custom_normals"](me, normals)  # clears the old custom normals first, so zeros mean auto
             row["corners_border_ring"] = ring
             bpy.app.driver_namespace["retopo_region_orig_" + tag] = oi.copy()  # new vertex -> source vertex, for checks
             row.update(corners_kept=kept, corners_reset=reset)

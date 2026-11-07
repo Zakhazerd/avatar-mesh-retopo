@@ -134,12 +134,7 @@ for c in outside:
     for li in pv.loop_indices:
         worst = max(worst, float(np.degrees(np.arccos(np.clip(nv_[li] @ nb_[lb[int(oi[v.loops[li].vertex_index])]], -1, 1)))))
 out["outside_normals_max_deg"] = round(worst, 4)
-ref = v.copy()
-ref.normals_split_custom_set([(0.0, 0.0, 0.0)] * len(ref.loops))
-nr = np.empty(len(ref.loops) * 3)
-ref.corner_normals.foreach_get("vector", nr)
-nr = nr.reshape(-1, 3)
-bpy.data.meshes.remove(ref)
+nr = bns["lib"]["auto_corner_normals"](v)  # a true reset (zeros on a copy change nothing in Blender 5.2)
 border_verts = {v.loops[li].vertex_index for f in outside_set for li in v.polygons[f].loop_indices}
 reg_dev = []
 for p in v.polygons:

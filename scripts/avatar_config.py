@@ -9,6 +9,8 @@ BODY = "<set me: the skinned body mesh>"  # the source for body regions and the 
 GARMENT = None  # a garment for the garment methods (build_variants.py), e.g. "Shirt"
 GARMENTS = []  # everything worn over the body, e.g. ["Stockings", "Bra"]: the clothing guard, the poke-through
 # metric, and what's shown over the body in textured renders
+UNDER = []  # when BODY is itself a garment (build_region.py on a shirt): what lies under it, e.g. ["Body", "Bra"];
+# a loop is kept if the garment would sink into one of them
 
 # The body region to reduce (build_region.py), by REGION_MODE:
 #   "below"     at most half their bone weight on REGION_ROOT_BONE and the bones under it (the neck bone gives

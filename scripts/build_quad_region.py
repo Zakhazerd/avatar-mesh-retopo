@@ -229,7 +229,7 @@ try:
         rebuilt = ~rebuilt
         me.attributes.remove(me.attributes["retopo_normal"])
         me.attributes.remove(me.attributes["retopo_copied"])
-        me.normals_split_custom_set(nrm.reshape(-1, 3).tolist())
+        bns["lib"]["set_custom_normals"](me, nrm.reshape(-1, 3))  # zeros mean auto only once old ones are cleared
         orig = np.array([p[0][0] if len(p) == 1 or all(w == 0 for _, w in p[1:]) else -1 for p in spec.vsrc])
         bpy.app.driver_namespace["retopo_region_orig_" + TAG] = orig
         sides = np.array([p.loop_total for p in me.polygons])
